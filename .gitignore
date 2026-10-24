@@ -49,3 +49,7 @@ publish/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# ---------- ZCode / CodeGraph 本地工具数据 ----------
+.zcode/
+.codegraph/
