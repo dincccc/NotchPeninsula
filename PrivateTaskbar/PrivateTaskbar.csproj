@@ -1,0 +1,49 @@
+<Project>
+
+  <!-- 主工程 SDK 的默认 Compile glob（**/*.cs）会把本目录的源码与 obj 产物一起编进主程序集：
+       obj 产物（AssemblyAttributes 等）会直接导致主工程 CS0579 重复特性错误。
+       把本工程的中间/输出目录挪进主工程自己的 obj/bin（其 DefaultItemExcludes 覆盖那里）即可躲开。
+       这两个属性必须在 Sdk.props / Microsoft.Common.props 导入之前设置（否则 MSB3539/MSB3540）。 -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)..\obj\PrivateTaskbar\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)..\bin\PrivateTaskbar\</BaseOutputPath>
+  </PropertyGroup>
+
+  <!-- 显式拆分 import：让上面的属性在 SDK 导入链之前生效。 -->
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+
+  <PropertyGroup>
+    <!-- 必须与主程序一致，否则无法被加载 -->
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <OutputType>Library</OutputType>
+    <AssemblyName>PrivateTaskbar</AssemblyName>
+    <Version>1.0.0</Version>
+    <RootNamespace>PrivateTaskbar</RootNamespace>
+    <!-- 宿主用了 WinForms 不会传递给插件；本插件要用 Screen.WorkingArea 拿工作区
+         （WindowsDesktop framework 清单自带 System.Diagnostics.PerformanceCounter，GPU 采样无需额外包） -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <Authors>dincccc</Authors>
+    <!-- 主工程吞编本目录源码后，主程序集里也导出了同名 public 类型，插件编译会报 CS0436
+         （编译器选本工程 local 类型，运行行为正确）。根因消除需主工程 csproj 排除
+         PrivateTaskbar\**（不在本插件授权范围内），此处仅压制警告噪音。 -->
+    <NoWarn>$(NoWarn);CS0436</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\NotchPeninsula.csproj" />
+  </ItemGroup>
+
+  <!-- 编译后自动把 dll 复制到主程序输出目录的 plugins 文件夹 -->
+  <Target Name="InstallToHostPlugins" AfterTargets="Build">
+    <PropertyGroup>
+      <HostPluginDir>$(MSBuildThisFileDirectory)..\bin\$(Configuration)\$(TargetFramework)\plugins</HostPluginDir>
+    </PropertyGroup>
+    <MakeDir Directories="$(HostPluginDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(HostPluginDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+
+</Project>
