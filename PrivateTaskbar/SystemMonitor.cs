@@ -21,6 +21,7 @@ public sealed class SystemMonitor : IDisposable
     private ulong _lastIdle, _lastSystem;
     private long _lastBytesIn, _lastBytesOut;
     private long _lastTick;
+    private bool _netBaselineReady; // 首采只建基线不产出：否则字节差=开机以来全部流量/几毫秒 → 几百 G/s（用户实测复现）
     private float _lastGpu;
     private DateTime _gpuCountersBuilt = DateTime.MinValue;
     private readonly List<PerformanceCounter> _gpuCounters = new();
@@ -116,12 +117,17 @@ public sealed class SystemMonitor : IDisposable
 
         long now = Environment.TickCount64;
         float down = 0, up = 0;
-        if (_lastTick > 0 && now > _lastTick && bytesIn >= _lastBytesIn && bytesOut >= _lastBytesOut)
+        if (_netBaselineReady && _lastTick > 0 && now > _lastTick
+            && bytesIn >= _lastBytesIn && bytesOut >= _lastBytesOut)
         {
             float dt = (now - _lastTick) / 1000f;
-            down = (bytesIn - _lastBytesIn) / dt;
-            up = (bytesOut - _lastBytesOut) / dt;
+            if (dt >= 0.5f) // 采样周期 1s：dt 异常小（时钟回拨/重入）时宁可不产出，不给出天量数字
+            {
+                down = (bytesIn - _lastBytesIn) / dt;
+                up = (bytesOut - _lastBytesOut) / dt;
+            }
         }
+        _netBaselineReady = true;
         _lastBytesIn = bytesIn; _lastBytesOut = bytesOut; _lastTick = now;
 
         _snapshot = new MonitorSnapshot(cpu, ram, gpu, down, up);
