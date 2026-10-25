@@ -64,6 +64,114 @@ reviewer 子代理审查全部 9 文件（无 Critical）+ 复核修复（8 通�
 
 **git 提交（10-25）**：`.zcode/`、`.codegraph/` 加入 .gitignore 并移出暂存；按功能模块三段提交（插件源码 / 文档 / gitignore）。
 
+### 第五轮：用户实测 4 问题修复 + 样式重设计（10-25 上午完成）
+
+用户实测（第三轮 dll + 2.1.0 宿主）报 4 问题。**重要环境发现：当前会话中 PowerShell 注入的鼠标事件（SetCursorPos/mouse_event）被系统级吞掉**（点击系统托盘音量图标无反应、杀宿主后依旧——低级钩子过滤注入事件，嫌疑 ZCode 客户端/安全软件）；上轮"模拟点击验证法"失效。**hover/右键交互只能靠用户物理鼠标实测**；截图类验证不受影响。
+
+| # | 用户问题 | 根因 | 修复 | 验证 |
+|---|---------|------|------|------|
+| 1 | 全屏后才显示条；应用关闭后条消失（连空壳都没了） | 全屏判据只有 SHQueryUserNotificationState——它会因专注助手/全屏优化等**滞留 BUSY**，应用关了条不恢复；另无任何"条意外消失"的自愈路径 | ① 全屏改双条件：QUNS 报屏蔽态 **且** `HasFullscreenForeground()`（前台窗口真覆盖整屏、排除 Progman/WorkerW/Shell_TrayWnd）；② 新增 `HealthCheck` 每 2s 巡检（仅正常显示态）：IsWindowVisible+位置偏差>8px → Relayout+SHOWWINDOW 自愈 | **程序化实测通过**：WinForms 全屏窗 → 条隐藏；关闭 → 3s 内完整恢复 |
+| 2 | 网速改上下两行 ↑↓ | - | `DrawNet` 改两行（行中心 cy-7.5/cy+6 与 DrawMonitor 对齐），箭头改彩色自绘三角（↑青 5EEAD4 / ↓蓝 7CB8FF，全 UI 唯一彩色=方向语义），数值白 245 | 截图确认两行+彩色箭头 ✓ |
+| 3 | hover 偶尔失效、无法右键（复现于关闭右键菜单后） | 菜单窗口 capture 期间任务栏收不到鼠标消息，关闭后其 TME_LEAVE/hover 跟踪状态可能卡死 | 菜单 `Closed` 回调（UI 线程）调 `TaskbarWindow.ResetHover()`：_hovered/_hoverAction/_trackLeave/_bgAlpha 整组复位 + Invalidate，下一次移动重走完整 hover 流程；HideBar 也改走 ResetHover | **待用户物理鼠标实测**（注入测试失效） |
+| 4 | 媒体控件最右侧竖线 | 媒体区与监控组之间的 1px Divider（alpha 36） | 删除 Divider 模块，改 MediaTailGap=16px 呼吸间距 | 截图确认 ✓ |
+
+**样式重设计（frontend-design 流程，保留胶囊形态/hover 淡入/频谱灵动岛同款）**：
+- 字色三层拉开：主内容（歌名/数值/时钟）235-245→245-255，次级（label/歌手/日期）140-165→168-185，封面占位底 26→32；条 hover 背景 232→238、边框 28→30
+- 菜单：底 (24,24,28,246)→(19,19,23,250)、圆角 8→10、RowH 32→34、PadV 4→6、SepH 11→13、宽 250→256、hover 30→22（圆角 7）、文字 235→243、分隔线 30→22、标记左移 21→23/文字 14/34→16/36
+
+**部署**：新 dll（含第四+五轮全部修复）已拷 `E:/NotchPeninsula/plugins/PrivateTaskbar.dll`（旧版备份 `plugins/_recycle/PrivateTaskbar.v202-20261024.dll`），2.1.0 宿主已重启加载（08:31）。
+
+### 第六轮：逻辑梳理重构（10-25，用户拍板"避免补丁式更新"）
+
+用户再报 5 问题。日志实锤：**SMTC 媒体会话每 ~270ms 高频重建**（B 站直播页），含瞬时 `[null]` 封面——媒体源本身在抖；媒体控制命令**零失败记录**（都成功发出）。用户明确：**删掉全屏判断这类"聪明逻辑"，从实现逻辑梳理**。
+
+**重构（第五轮的全屏双条件被推翻删除）**：
+1. **删整套全屏隐藏逻辑**（QUNS 探测/前台覆盖判定/_fsHidden/timer 动态降频 + NativeMethods 对应 P/Invoke）——条恒 TOPMOST 恒显示，全屏应用盖住它=自然遮挡，不需要配合隐藏。这是"消失/闪烁/右键失效"的主要嫌疑源。
+2. **保留 2s 自愈巡检**（HealthCheck，仅可见性+位置校验，与全屏无关），触发时记日志（rect+期望位置）——下次"消失"有现场证据。OnTimerTick 只剩巡检。
+3. **频谱静态柱**（用户问题 1）：暂停/无数据时画 5 根最低 2px 静态柱（暗白 105），媒体区显示时频谱永远有形。
+4. **ResetHover 精确化**（用户问题 3"菜单弹出后 hover 消失"的真正机制）：菜单 capture 期间任务栏收不到 move，关闭后**静止的鼠标不会再产生 WM_MOUSEMOVE**——ResetHover 现在探测光标，仍悬在条内则恢复 _hovered=true 并重注册 TME_LEAVE；HideBar 同走此路径。
+5. **媒体命令日志**（用户问题 2 排查证据）：Invoke 记录命令+会话激活状态+曲目。**结论：命令全部成功发出无异常——B 站网页视频/直播的 SMTC 常不响应系统级播放控制（宿主灵动岛按钮同样无效），需用网易云/QQ音乐等正规播放器对照验证**。
+6. **两模式显式化**（用户问题 5）：BuildLayout 注释定调——模式由「媒体会话激活且媒体开关开」唯一决定；有媒体=封面+文字+按钮+频谱+（时钟/资源/网速按各自开关），无媒体=仅时钟/资源/网速按各自开关；控件不做交叉耦合。
+
+**部署**：重构版已部署 E 盘并重启宿主（08:52），截图验收：暂停态频谱静态柱/网速两行/无竖线/字色全部正常（用户设置里资源监控当前关闭）。
+
+### 第七轮：z 序根因修复 + 首载网速（10-25，复用宿主机制）
+
+用户再报 4 问题。**截图实锤问题 3/4 的同一根因**：右键条弹出的却是**系统任务栏菜单**——条与任务栏同为 TOPMOST，其他窗口开/关/激活重排 TOPMOST 链，条被压到任务栏之下（不可点、被任务栏盖住）。
+
+| # | 问题 | 根因 | 修复 |
+|---|------|------|------|
+| 1 | 首次加载网速几百 G/s | `Start()` 先设 `_lastTick` 再立即首采，`_lastBytesIn=0` 无基线 → 字节差=开机以来全部流量 ÷ 几毫秒 | `_netBaselineReady` 标志：首采只建基线不产出；dt<0.5s 也拒绝产出（防时钟异常天量值） |
+| 2 | 静态频谱颜色不醒目 | alpha 105 太暗 | 提到 170（播放态纯白动态 vs 暂停态白 170 静态，仍可区分） |
+| 3+4 | 无法 hover/右键（弹的是任务栏菜单）；窗口化时条被压到任务栏下层 | 条被 TOPMOST 链重排压到任务栏之下 | **复用宿主同款置顶保活**（`NotchWindow.EnsureTopmostAlive` → 插件 `EnsureTopmost`）：每 2s `SetWindowPos(HWND_TOPMOST)` 重申 z 序，Interlocked 重入保护，前台是宿主自己进程时跳过；并入 HealthCheck 节奏 |
+
+用户再次强调：**能用宿主提供的就用**——置顶保活直接照搬宿主机制；网速宿主无 public API（顶部 NET 是第三方 sysmonitor 插件自采），保留自采+修 bug。
+
+**部署**：已部署 E 盘重启宿主（09:11），截图验收：静态频谱醒目、首载网速正常（1.3KB/s）。
+
+### 第八轮：分模式控件开关 + 逐字歌词 + 帧率对齐（10-25 上午完成，v1.1.0 已部署）
+
+用户再报 3 需求 + 要求更新版本号重新部署。全程贯彻"能用宿主提供的就用"。
+
+| # | 需求 | 实现 |
+|---|------|------|
+| 1 | 无媒体时开的时钟，播放媒体后还显示（开关只有一份，两模式共用） | **分模式记忆**：`TaskbarSettings` 新增 `ShowClockMedia/ShowResourcesMedia/ShowNetMedia` 三键（`show_clock_media` 等持久化）；`BuildLayout` 按 hasMedia 读对应键；右键菜单勾选状态与切换目标按菜单打开瞬间的模式路由（新 `MenuLabel` 灰色说明行标注"有/无媒体模式 · 以下三项独立记忆"）。迁移默认：时钟媒体模式默认关（用户期望行为），资源/网速跟随主键（老设置无感）。互斥方案不需要了 |
+| 2 | 歌词逐字效果 | **数据用宿主的**：`MediaController.CurrentLyricProgress`（public，与 CurrentLyric 同源同步）→ `MediaBridge.MediaInfo.LyricProgress`；**算法复刻宿主 `Renderer.DrawKaraoke`**：整句先画 40% 亮度底板 → `ClipRect(x, y-14, x+scanW, y+4)` 重画全亮。暂停时宿主 progress 冻结 → 扫光自然停住 |
+| 3 | 频谱动效不如宿主流畅 | 排查结论：**数据源就是宿主的 `AudioAnalyzer`**（public 类自建实例，宿主实例是 NotchWindow private 无出口），渲染参数与宿主 `Renderer.MediaWidget` 完全一致（2px 柱/2.8 间隔/圆角 1.5），**真正差距在帧率**：插件 31ms（≈32FPS）vs 宿主默认档 90fps → 改 15ms（实际 15.6ms ≈ 64FPS，user timer 粒度上限）。`LiquidGlass.FrameIntervalMs` 是 internal 读不到，宿主档位变化需热重载跟随 |
+
+版本号 1.0.0 → **1.1.0**（csproj + PrivateTaskbarPlugin.Version）。
+
+**部署**：编译 0 警告 0 错误，已部署 E 盘重启宿主（10:00，v1.1.0 加载确认）。截图验收：**逐字扫光生效**（"天空海阔"亮/"你与我"暗）、**有媒体模式时钟隐藏**（分模式开关默认值正确）、频谱正常（0 错误日志）、网速两行正常。
+
+**注意**：`cmd //c start` 在 Git Bash 后台卡死（宿主首次启动失败），改用 `powershell Start-Process -WorkingDirectory E:\NotchPeninsula` 成功。
+
+### 第九轮：条被压闪/消失的检测式修复（10-25 上午完成，仍在 v1.1.0）
+
+用户报：①开关应用窗口时条闪一下；②窗口反复开关后右键菜单关闭，条消失约 2s 才回来。
+
+**根因（两个症状同一链条）**：TOPMOST 链重排把条压到系统任务栏之下（第七轮已实锤的机制，触发点包括菜单窗口销毁）。旧保活有两个缺陷：HealthCheck 巡检只查"可见性/位置"——**被压时条仍可见、位置正确，巡检完全无感知**；盲提挂在巡检里 2s 一次——被压后要等最多 2s 才拉回，这就是"消失一段时间"；开关窗口的重排被 2s 盲提拉回的过程即"闪一下"。
+
+**修复（TaskbarWindow.EnsureTopmost 检测式升级）**：
+- 从"巡检内 2s 盲提"改为 **OnTimerTick 每帧检测**（纳秒级 GetWindow 遍历）：`IsAboveTaskbar()` 查**条 vs Shell_TrayWnd 的相对 z 序**（从条沿 GW_HWNDPREV 向上走，先遇到任务栏=被压）+ 条自身 WS_EX_TOPMOST 位检查；被压才 `SetWindowPos(HWND_TOPMOST)` 提回并记 Info 日志——恢复延迟从 2s 压到一帧（15.6ms），且留下被压证据。
+- `PrivateTaskbarPlugin` 菜单 `Closed` 回调（已知重排点）追加 `EnsureTopmostNow()` 立即补救。
+
+**压力测试实锤的关键教训**：第一版判据"条必须在 TOPMOST 组绝对顶部"与 **IME 输入法窗口每 16ms 无限拉锯**（日志刷屏 5 条/80ms）——IME/开始菜单等系统 UI 合法待在 TOPMOST 组顶、并不盖条的位置。修正为"只看条 vs 任务栏相对序"后四轮压力测试零误报。条不需要压过全世界，只需要压住任务栏。
+
+**部署**：E 盘宿主重启（10:30，PID 8136），四轮程序化 TOPMOST 窗口开关后条稳定、截图正常。
+
+### 第十轮：宽度变化照宿主架构改弹簧动画（10-25 上午完成，仍在 v1.1.0）
+
+用户报：插件宽度变化生硬，参考宿主方案优化。
+
+**宿主方案探索结论（Renderer.cs / NotchWindow.cs）**：窗口创建后**尺寸恒定**（`WINDOW_WIDTH`≥1280 逻辑px × `MAX_WINDOW_HEIGHT`≥220），岛体在窗口内居中绘制（`islandLeft=(WINDOW_WIDTH-currentWidth)/2`），宽度变化是纯绘制层动画：目标宽变化记起点 → `SpringEase(t)=1-cos(2.65·t·2π)·e^(-10.8t)` 逐帧插值 → 0.45s 后 snap。**窗口从不 resize**——没有 DIB 重建、没有 DWM 重排，这正是灵动岛宽度动画流畅的根本原因。
+
+**插件实施（宿主同架构同参数）**：
+- `FixedWinW=900` 恒定窗口（覆盖全控件场景 ~830），胶囊在窗口内按位置模式对齐：贴托盘=右对齐（右缘不动左缘伸缩）、开头=左对齐、居中=居中——三种模式的可见缘语义与旧版一致。
+- 弹簧参数照搬宿主（2.65Hz / 10.8 衰减 / 0.45s）；每帧目标宽=布局测量宽，**≥2px 才起弹簧**（网速数字每秒 1~2px 的抖动直接贴合，不弹）。
+- 内容 `ClipRect` 裁到当前动画宽度（回弹过冲不越界）；hover 背景/命中层（alpha 2/255）跟随胶囊 rect；`TaskbarRenderer.Paint` 加 `offsetX`（内部 Translate，hits 换算回窗口坐标）；`ResetHover` 按**胶囊区**判断（窗口恒定加宽后透明穿透区不算 hover）。
+- **整体删除 resize 重排机制**：`WM_APP_RELAYOUT`/`RelayoutThresholdPx`/`_relayoutPending` 消失，ResizeTo 只在 DPI/条高变化时触发。
+
+**部署**：编译 0/0，E 盘宿主重启（11:00，PID 17044）。验证：EnumWindows 实测窗口 **900×46 恒定**（46=任务栏带高自适应）、Start 模式胶囊左对齐 x=8、截图正常（透明区完全隐形、渲染无异常）。弹簧手感受用户实测。
+
+### 第十一轮：死代码清理（10-25，receiving-code-review 流程，仍在 v1.1.0）
+
+逐成员交叉验证引用后删除（全部有实锤：无引用/无调用点/无发送方），行为零变化：
+
+| 文件 | 删除项 | 依据 |
+|------|--------|------|
+| SkiaWindow.cs | `OnKeyDownEscape` 虚方法 | 无调用点（无 WM_KEYDOWN 分支）、无 override |
+| SkiaWindow.cs | `WM_APP_CLOSEMENU` case + `CloseFromExternal` 虚方法 | 无发送方——菜单"点外关闭"早已被 PollTimer 兜底替代 |
+| SkiaWindow.cs | `OnAppMessage` 虚方法 + WM_APP 区间分支 + "如任务栏的 RELAYOUT"注释 | 第十轮删 TaskbarWindow.OnAppMessage 后无 override 空转（RunOnUi 的 WM_APP+0x40 有独立 case 不受影响） |
+| NativeMethods.cs | `WS_VISIBLE`、`WM_APP_CLOSEMENU` 常量 | 零引用（CreateWindowEx 故意不带 VISIBLE，注释有说明） |
+| TaskbarRenderer.cs | `DividerGap` 常量 | 竖线分隔第四轮删除后零引用 |
+| TaskbarRenderer.cs | `MediaInfo.IsActive` record 字段 | `Current` 构造时已过滤 `!c.IsActive`，字段无消费方（过滤本身保留） |
+| TaskbarRenderer.cs | `Paint` 的未用 `width` 参数 | 方法体内未用（布局自带宽度），调用处同步 |
+| TaskbarWindow.cs | `BarHeight` public→private；`_animTimer` 注释 32FPS→15ms 64FPS | 无外部消费者；注释过时 |
+
+**有意保留**：全部 Win32 坑/铁律注释（1412 注销时机、SetWindowPos 必带 NOMOVE、alpha 穿透、热重载 GUID 类名等——它们是项目约定的文档化载体）；`OnMouseLeftUp`（有 WM_LBUTTONUP case 调用，活的空钩子契约）；`SkiaWindow.Dispose`（IDisposable 实现）。
+
+验证：编译 0/0，E 盘宿主重启，截图渲染无回归。
+
 ## 三、待办（新会话从这里继续）
 
 ### 1. worktree 清理（命令已给出，用户自行操作）
@@ -77,17 +185,15 @@ cd H:/Projects/NotchPeninsula && git worktree remove --force H:/Projects/nps-v20
 
 ⚠️ 删除后将无法再编译 v2.0.2 兼容版插件（v2.0.2 宿主 AssemblyVersion 低，不能加载 2.1.0 API 编译的 dll）。E 盘若还需跑 2.0.2 宿主，`E:/NotchPeninsula/plugins/PrivateTaskbar.dll` 里那份 v2.0.2 编译产物（10-24 21:09）勿覆盖。
 
-### 2. E 盘宿主迁移 2.1.0 + 验证（上轮验证清单仍然全部未做）
+### 2. E 盘宿主验证（第五轮修复已部署，待用户实测）
 
-- [ ] **部署 2.1.0 版插件**：H 盘 HEAD 编译的 dll 拷 `E:/NotchPeninsula/plugins/`（会覆盖 v2.0.2 编译产物，先确认不再需要 v2.0.2）。E 盘启动 `NotchPeninsula.v2.1.0.exe`。
-- [ ] **日志验证**：宿主日志确认新 dll 加载成功、窗口创建日志类名带 GUID 后缀、创建位置 -32000。日志位置未最终确认——`$LOCALAPPDATA/NotchPeninsula/` 下有 `app.log`/`app-20261024-20231313.log`/`settings-hub.log`（上次 tail 被取消，未读到内容）。
-- [ ] **P0 崩溃场景实测**：插件中心禁用→立即重新启用，反复数次，宿主不崩、条恢复显示。本轮最重要的验证。
-- [ ] **窗口类泄漏回归**：反复右键开关菜单数次 + 禁用/启用数次后，宿主日志无 RegisterClass 失败；本轮修复 1 的验证。
-- [ ] **全屏回归（重点）**：F11/视频全屏进入→退出，条必须自动恢复（本轮修复 5 的降频 timer 路径）；进入全屏期间 CPU 占用应下降（800ms 空转帧消除）。
-- [ ] 左上角闪烁：重启宿主观察启用瞬间。
-- [ ] 频谱观感、网速每秒一跳、无歌词单行加粗（回归确认）。
-- [ ] 桌面验证方法（已验证可用）：PowerShell Add-Type 截屏(CopyFromScreen)+SetCursorPos/mouse_event 模拟点击+EnumWindows/GetWindowRect 枚举窗口+vision 代理分析截图；注意 ZCode 客户端 UI 可能遮挡任务栏造成误判；PowerShell 5.1 不支持 C#6+ 语法（string?/$""），Add-Type 用封装 Run() 方法模式。
-- [ ] E/H 盘宿主共享插件启用/失败名单（复现前需清理注册表状态）。
+- [x] **部署 2.1.0 版插件 + 重启宿主**：完成（08:31，dll 含第四+五轮全部修复）。
+- [x] **全屏隐藏/恢复**：程序化实测通过（全屏窗 → 隐藏；关闭 → 恢复）。
+- [ ] **hover/右键实测（用户物理鼠标）**：① 条上 hover 淡入；② 右键弹菜单；③ 反复开关菜单后 hover/右键仍正常（本轮修复 3 的场景）；④ 菜单样式（新圆角/行高/字色）观感。
+- [ ] **网速/样式观感**：网速两行彩色箭头、字色亮度、竖线消失。
+- [ ] **真实全屏应用回归**：浏览器 F11/视频全屏 → 隐藏；关闭 → 恢复（专注助手开着也不应卡死）。
+- [ ] P0 热重载（插件中心禁用→立即启用反复数次）、窗口类泄漏回归、频谱/无歌词/媒体区联动、持久化、空壳模式。
+- [ ] 桌面验证：**PowerShell 注入鼠标事件在本会话环境被吞（不可用）**，仅截图类可用（CopyFromScreen）；E/H 盘宿主共享插件启用/失败名单（复现前需清理注册表状态）。
 
 ### 3. 用户验收剩余项（上轮遗留）
 
@@ -107,7 +213,7 @@ cd H:/Projects/NotchPeninsula && git worktree remove --force H:/Projects/nps-v20
 - **Win32 坑**：WNDCLASS 结构体必须 `[StructLayout(..., CharSet=CharSet.Unicode)]`；所有不改位置的 SetWindowPos 必须带 SWP_NOSIZE|SWP_NOMOVE；分层窗口 alpha=0 像素点击穿透（命中需 alpha≥1，常驻 2/255 命中层）；UpdateLayeredWindow 会隐式显示窗口；线程级 SetCapture 对跨进程点击不可靠（轮询兜底）。
 - **热重载（本轮新增）**：窗口类必须每实例唯一（GUID 后缀），绝不沿用 RegisterClass=1410 的残留类；Dispose 必须先置 Closing 停工作、Join 超时要 PostThreadMessage(WM_QUIT) 兜底；宿主 Teardown 同步调 Dispose 后 `alc.Unload()` 异步卸载，窗口类/线程残留 = 崩溃定时炸弹。
 - **UnregisterClass 时机铁律（第四轮新增）**：WM_DESTROY 内 UnregisterClass 必得 1412（窗口还在销毁序列内），只能在 DestroyWindow 返回后调（现统一在 SkiaWindow.Cleanup 尾部）；1 个窗口类占 1 个 win32k 全局原子（全系统共享），右键菜单每开一次就注册/注销一对，泄漏路径必堵。
-- **全屏 timer 铁律（第四轮新增）**：31ms 动画 SetTimer 是 OnTimerTick 全屏探测的唯一驱动源——隐藏期间只能降频（SetTimer 替换语义换 800ms），绝不能 KillTimer，否则退出全屏后条永久消失。
+- **动画帧率（第八轮更新）**：SetTimer 15ms（实际 15.6ms ≈ 64FPS，user timer 粒度上限；宿主默认 90fps，`LiquidGlass.FrameIntervalMs` internal 不可读）。OnTimerTick 的 HealthCheck 自带 2s 时间戳节流，帧率变化不影响；原"31ms 全屏探测驱动源"铁律随第六轮全屏逻辑删除而失效。
 - **DPI**：进程 PMv2，Screen.WorkingArea 返回物理像素；逻辑量×scale 换物理，wa 不再乘 scale。
 - **布局**：贴托盘以 `FindWindow("Shell_TrayWnd")→FindWindowEx("TrayNotifyWnd")` 实际左缘为准；条高 = min(52, 任务栏带高-2) 带内垂直居中。
 - **子代理体系**：6 个通用代理在 `C:\Users\Administrator\.zcode\agents\`（explorer/vision/implementer/reviewer/tester/scribe），模型 GLM-5.3-Flash 最高档。
