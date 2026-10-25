@@ -49,8 +49,9 @@ internal sealed class FullscreenMonitor
     }
 
     /// <summary>前台窗口是否盖住主屏（条的所在屏；条恒在主屏任务栏带，Relayout 同源取 PrimaryScreen）。
-    /// Win+D/桌面（Progman/WorkerW）、系统任务栏、宿主/插件自身窗口不算；带边框最大化只盖工作区、
-    /// 盖不满整屏，天然不误报。任何失败都按非全屏处理（保守侧：宁可不藏，绝不闪烁）。</summary>
+    /// Win+D/桌面（Progman/WorkerW）、系统任务栏、任务视图（TscShellContainerClass）、宿主/插件自身窗口、
+    /// XAML shell 弹层（开始菜单/搜索/操作中心）不算；带边框最大化只盖工作区、盖不满整屏，天然不误报。
+    /// 任何失败都按非全屏处理（保守侧：宁可不藏，绝不闪烁）。</summary>
     private bool ForegroundCoversScreen()
     {
         try
@@ -59,7 +60,7 @@ internal sealed class FullscreenMonitor
             if (fg == IntPtr.Zero) return false;
             string cls = NativeMethods.GetClassNameSafe(fg);
             LastForegroundClass = cls;
-            if (cls is "Progman" or "WorkerW" or "Shell_TrayWnd") return false;
+            if (cls is "Progman" or "WorkerW" or "Shell_TrayWnd" or "TscShellContainerClass") return false;
             _ = NativeMethods.GetWindowThreadProcessId(fg, out uint pid);
             if (pid == (uint)Environment.ProcessId) return false; // 宿主岛体/托盘菜单等自身窗口
             if (!NativeMethods.GetWindowRect(fg, out var r)) return false;
@@ -67,9 +68,25 @@ internal sealed class FullscreenMonitor
             var screen = System.Windows.Forms.Screen.PrimaryScreen;
             if (screen is null) return false;
             var sb = screen.Bounds;
-            return r.Left <= sb.Left + CoverSlackPx && r.Top <= sb.Top + CoverSlackPx
-                && r.Right >= sb.Right - CoverSlackPx && r.Bottom >= sb.Bottom - CoverSlackPx;
+            if (!(r.Left <= sb.Left + CoverSlackPx && r.Top <= sb.Top + CoverSlackPx
+                && r.Right >= sb.Right - CoverSlackPx && r.Bottom >= sb.Bottom - CoverSlackPx))
+                return false;
+            return !IsShellUiProcess(pid);
         }
         catch { return false; }
+    }
+
+    /// <summary>XAML shell 弹层（开始菜单/搜索/操作中心）的 CoreWindow 会报整屏矩形但视觉不满屏
+    /// （用户实测：点 Win 开始菜单弹出条即沉底），矩形判据对它们失真——按进程名排除。
+    /// 只在矩形已覆盖整屏的罕见路径调用（GetProcessById 有对象开销，不占常规探测热路径）。
+    /// 不排除 CoreWindow 类名本身，避免误伤真正的 UWP 全屏应用。</summary>
+    private static bool IsShellUiProcess(uint pid)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.GetProcessById((int)pid);
+            return p.ProcessName is "StartMenuExperienceHost" or "SearchHost" or "SearchApp" or "ShellExperienceHost";
+        }
+        catch { return false; } // 进程已退出等场景：不排除（该窗口本就转瞬即逝）
     }
 }

@@ -7,7 +7,7 @@ public sealed class PrivateTaskbarPlugin : INotchPlugin, IDisposable
 {
     public string Id => "com.dincccc.privatetaskbar.taskbarwidget"; // 必须含 taskbarwidget 标记，宿主据此豁免灵动岛"显示内容"列表
     public string DisplayName => "定制任务栏";
-    public string Version => "1.2.0";
+    public string Version => "1.2.1";
     public string Author => "dincccc";
 
     private IPluginHost? _host;
