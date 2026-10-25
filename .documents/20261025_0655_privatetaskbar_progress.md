@@ -227,6 +227,8 @@ reviewer 子代理审查全部 9 文件（无 Critical）+ 复核修复（8 通�
 3. **最终方案：z 序沉底让位（推翻隐藏/淡入整套流程）**——全屏时条 `SetWindowPos(HWND_BOTTOM)` 退 TOPMOST 组沉到 z 序最底，被全屏窗口自然盖住（像被纸压住）；退出全屏 `SetWindowPos(HWND_TOPMOST)` 原位露出。**没有隐藏、没有出现、没有任何过渡动画**——"出现突兀"从机制上不存在。淡入机制（FrameAlpha/_showAlpha/TickFadeIn）整体删除，SkiaWindow 回退。
 4. 让位态门控矩阵重审：EnsureTopmost/HealthCheck 门控保留（防每帧提回打架）；**Relayout/OnPaint 门控移除**（条仍可见，分辨率/设置/字体变更实时生效，恢复时位置已新鲜，Exit 无需 Relayout）；timer 降频 250ms 保留（被盖住的帧白画，省电；绝不能 Stop）；MenuDismissRequested 保留（菜单是独立 TOPMOST 窗口，条沉底它不跟，仍会浮在全屏上）。
 
+**误报修复（用户报"点 Win 开始菜单弹出条就消失"，15:02 部署，版本 1.2.0→**1.2.1**）**：日志实锤两个误报源——`Windows.UI.Core.CoreWindow`（开始菜单/搜索的 XAML 窗口，GetWindowRect 报整屏但视觉不满屏）与 `TscShellContainerClass`（任务视图覆盖层）。修复：类名排除加 TscShellContainerClass；XAML shell 弹层按**进程名**排除（StartMenuExperienceHost/SearchHost/SearchApp/ShellExperienceHost），查询放在矩形已覆盖整屏之后（罕见路径，不占热路径）；**不排除 CoreWindow 类名本身，避免误伤真 UWP 全屏**。遗留观察：日志另有 14:56-57 时段"条被压"高频记录（无沉底日志、EnsureTopmost 提回循环）——已向用户澄清这是第九轮的置顶保活机制（TOPMOST 链重排被压即提回），非全屏让位机制的动作；若反复出现需给被压日志加压制者类名排查。
+
 ## 三、待办（新会话从这里继续）
 
 
