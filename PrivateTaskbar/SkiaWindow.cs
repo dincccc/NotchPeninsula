@@ -48,7 +48,6 @@ public abstract class SkiaWindow : IDisposable
     protected virtual void OnMouseMove(float x, float y) { }
     protected virtual void OnMouseRightDown(float x, float y) { }
     protected virtual void OnMouseLeave() { } // TrackMouseEvent(TME_LEAVE) 触发：光标离开窗口
-    protected virtual void OnKeyDownEscape() { } // 分层窗口默认不激活，Esc 仅菜单窗口用
     /// <summary>窗口创建、缓冲就绪、首帧绘制完成后回调一次；此时 DpiScale100 已初始化，可安全做首次布局。</summary>
     protected virtual void OnWindowCreated() { }
     /// <summary>窗口销毁时释放子类持有的原生资源（如 AudioAnalyzer）。</summary>
@@ -219,9 +218,6 @@ public abstract class SkiaWindow : IDisposable
             case (uint)(NativeMethods.WM_APP + 0x40): // RunOnUi 投递唤醒
                 DrainQueue();
                 return IntPtr.Zero;
-            case NativeMethods.WM_APP_CLOSEMENU:
-                CloseFromExternal();
-                return IntPtr.Zero;
             case NativeMethods.WM_CLOSE:
                 NativeMethods.DestroyWindow(Hwnd);
                 return IntPtr.Zero;
@@ -232,12 +228,6 @@ public abstract class SkiaWindow : IDisposable
                 // 注销统一挪到 Cleanup（DestroyWindow 返回、窗口彻底消失之后）才真正生效。
                 if (QuitLoopOnDestroy) NativeMethods.PostQuitMessage(0); // 让 GetMessage 返回 0，RunMessageLoop 才能返回
                 return IntPtr.Zero;
-        }
-        // 其余 WM_APP 区间消息交给子类（如任务栏的 RELAYOUT）
-        if (msg >= NativeMethods.WM_APP && msg < NativeMethods.WM_APP + 0x20)
-        {
-            OnAppMessage(msg);
-            return IntPtr.Zero;
         }
         return NativeMethods.DefWindowProc(Hwnd, msg, wParam, lParam);
     }
@@ -259,8 +249,6 @@ public abstract class SkiaWindow : IDisposable
 
     protected virtual void OnDpiOrDisplayChanged() { }
     protected virtual void OnTimerTick() { } // WM_TIMER：子类先处理，再统一重绘
-    protected virtual void CloseFromExternal() { }
-    protected virtual void OnAppMessage(uint msg) { }
     /// <summary>鼠标捕获被夺走（lParam=新捕获者 HWND，可能为 0）。菜单窗口用来在 capture 被外部程序抢走时关闭自己。</summary>
     protected virtual void OnCaptureLost(IntPtr newCaptureHwnd) { }
 

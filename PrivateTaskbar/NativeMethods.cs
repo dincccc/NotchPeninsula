@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace PrivateTaskbar;
 
@@ -6,7 +7,6 @@ namespace PrivateTaskbar;
 internal static class NativeMethods
 {
     public const int WS_POPUP = unchecked((int)0x80000000);
-    public const int WS_VISIBLE = 0x10000000;
     public const int WS_EX_TOPMOST = 0x00000008;
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WS_EX_LAYERED = 0x00080000;
@@ -25,8 +25,6 @@ internal static class NativeMethods
     public const uint WM_CAPTURECHANGED = 0x0215;
     public const uint WM_APP = 0x8000;
     public const uint WM_APP_FRAME = WM_APP + 1;   // 动画帧（timer 兜底之外的主驱动）
-    public const uint WM_APP_CLOSEMENU = WM_APP + 2; // 菜单：点外部关闭
-    public const uint WM_APP_RELAYOUT = WM_APP + 3;  // 任务栏：内容宽变化，下一轮循环重排
     public const uint WM_MOUSELEAVE = 0x02A3;
     public const uint TME_LEAVE = 0x0002;
     public const uint WM_DISPLAYCHANGE = 0x007E;
@@ -39,17 +37,13 @@ internal static class NativeMethods
     public const uint SWP_HIDEWINDOW = 0x0080;
     public static readonly IntPtr HWND_TOPMOST = new(-1);
 
-    // ---- 全屏检测（与宿主 NotchWindow 同款：SHQueryUserNotificationState） ----
-    public const int QUNS_BUSY = 2;                    // 全屏应用运行中 / 演示文稿设置
-    public const int QUNS_RUNNING_D3D_FULL_SCREEN = 3; // 独占模式全屏 D3D
-    public const int QUNS_PRESENTATION_MODE = 4;       // 演示文稿模式
-    [DllImport("shell32.dll")]
-    public static extern int SHQueryUserNotificationState(out int pquns);
-
     public const int IDC_ARROW = 32512;
     public const uint ULW_ALPHA = 0x02;
     public const byte AC_SRC_OVER = 0x00;
     public const byte AC_SRC_ALPHA = 0x01;
+
+    public const uint GW_HWNDPREV = 3;   // z 序中的上一个（更高）窗口
+    public const int GWL_EXSTYLE = -20;
 
     // CharSet 必须标在结构体上：string 字段的封送字符集由结构体自身决定（默认 ANSI），
     // 缺了它 lpszClassName 会按 ANSI 字节传入 RegisterClassW，注册出乱码名类，CreateWindowEx 报 1407 找不到类
@@ -177,7 +171,26 @@ internal static class NativeMethods
     [DllImport("user32.dll")] public static extern bool ReleaseCapture();
     [DllImport("user32.dll")] public static extern IntPtr GetCapture();
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT lpPoint);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
+    // x64 进程对 GWL_EXSTYLE 这类 32 位值用 GetWindowLong 合法（句柄类值才需要 GetWindowLongPtr）
+    [DllImport("user32.dll", SetLastError = true)] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
+
+    /// <summary>取证辅助：窗口类名（失败返回 "?"），用于日志定位是谁把条压下去的。</summary>
+    public static string GetClassNameSafe(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return "?";
+        try
+        {
+            var sb = new StringBuilder(256);
+            return GetClassName(hWnd, sb, sb.Capacity) > 0 ? sb.ToString() : "?";
+        }
+        catch { return "?"; }
+    }
 
     [StructLayout(LayoutKind.Sequential)]
     public struct TRACKMOUSEEVENT

@@ -10,6 +10,7 @@ public sealed record MenuCommand(string Text, Action Run) : MenuEntry;
 public sealed record MenuCheck(string Text, bool Checked, Action Toggle) : MenuEntry;
 public sealed record MenuRadio(string Text, bool Checked, Action Select) : MenuEntry;
 public sealed record MenuSeparator() : MenuEntry;
+public sealed record MenuLabel(string Text) : MenuEntry; // 灰色小说明行（不可点、无 hover）
 public sealed record MenuSubmenu(string Text, IReadOnlyList<MenuEntry> Children) : MenuEntry;
 
 /// <summary>
@@ -19,7 +20,7 @@ public sealed record MenuSubmenu(string Text, IReadOnlyList<MenuEntry> Children)
 /// </summary>
 public sealed class ContextMenuWindow : SkiaWindow
 {
-    private const float RowH = 32f, SepH = 11f, PadV = 4f, MenuW = 250f, TextSize = 12f;
+    private const float RowH = 34f, SepH = 13f, PadV = 6f, MenuW = 256f, TextSize = 12.5f, LabelH = 24f;
 
     private readonly List<(float Y, float H, MenuEntry Entry)> _rows = new();
     private readonly ContextMenuWindow? _parent; // 子菜单指向上级；根为 null
@@ -37,9 +38,9 @@ public sealed class ContextMenuWindow : SkiaWindow
         float y = PadV;
         foreach (var e in entries)
         {
-            bool sep = e is MenuSeparator;
-            _rows.Add((y, sep ? SepH : RowH, e));
-            y += sep ? SepH : RowH;
+            float rh = e is MenuSeparator ? SepH : e is MenuLabel ? LabelH : RowH;
+            _rows.Add((y, rh, e));
+            y += rh;
         }
     }
 
@@ -48,7 +49,7 @@ public sealed class ContextMenuWindow : SkiaWindow
     private static int ComputeHeight(IReadOnlyList<MenuEntry> entries)
     {
         float h = PadV * 2;
-        foreach (var e in entries) h += e is MenuSeparator ? SepH : RowH;
+        foreach (var e in entries) h += e is MenuSeparator ? SepH : e is MenuLabel ? LabelH : RowH;
         return (int)MathF.Ceiling(h);
     }
 
@@ -253,10 +254,10 @@ public sealed class ContextMenuWindow : SkiaWindow
 
     protected override void OnPaint(SKCanvas canvas, int width, int height)
     {
-        using (var bg = new SKPaint { IsAntialias = true, Color = new SKColor(24, 24, 28, 246) })
-            canvas.DrawRoundRect(0.5f, 0.5f, width - 1f, height - 1f, 8f, 8f, bg);
-        using (var border = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 1f, Color = new SKColor(255, 255, 255, 32) })
-            canvas.DrawRoundRect(0.5f, 0.5f, width - 1f, height - 1f, 8f, 8f, border);
+        using (var bg = new SKPaint { IsAntialias = true, Color = new SKColor(19, 19, 23, 250) })
+            canvas.DrawRoundRect(0.5f, 0.5f, width - 1f, height - 1f, 10f, 10f, bg);
+        using (var border = new SKPaint { IsAntialias = true, Style = SKPaintStyle.Stroke, StrokeWidth = 1f, Color = new SKColor(255, 255, 255, 24) })
+            canvas.DrawRoundRect(0.5f, 0.5f, width - 1f, height - 1f, 10f, 10f, border);
 
         var tf = PluginFont.Resolve();
         for (int i = 0; i < _rows.Count; i++)
@@ -264,14 +265,20 @@ public sealed class ContextMenuWindow : SkiaWindow
             var (y, h, entry) = _rows[i];
             if (entry is MenuSeparator)
             {
-                using var lp = new SKPaint { IsAntialias = true, StrokeWidth = 1f, Color = new SKColor(255, 255, 255, 30) };
-                canvas.DrawLine(10f, y + h / 2f, width - 10f, y + h / 2f, lp);
+                using var lp = new SKPaint { IsAntialias = true, StrokeWidth = 1f, Color = new SKColor(255, 255, 255, 22) };
+                canvas.DrawLine(12f, y + h / 2f, width - 12f, y + h / 2f, lp);
+                continue;
+            }
+            if (entry is MenuLabel lab)
+            {
+                using var lp = new SKPaint { IsAntialias = true, TextSize = 10.5f, Typeface = tf, Color = new SKColor(255, 255, 255, 145) };
+                canvas.DrawText(lab.Text, 16f, y + h / 2f + 3.5f, lp);
                 continue;
             }
             if (i == _hoverRow)
             {
-                using var hp = new SKPaint { IsAntialias = true, Color = new SKColor(255, 255, 255, 30) };
-                canvas.DrawRoundRect(4f, y + 2f, width - 8f, h - 4f, 6f, 6f, hp);
+                using var hp = new SKPaint { IsAntialias = true, Color = new SKColor(255, 255, 255, 22) };
+                canvas.DrawRoundRect(5f, y + 3f, width - 10f, h - 6f, 7f, 7f, hp);
             }
 
             bool hasMark = entry is MenuCheck or MenuRadio;
@@ -283,12 +290,12 @@ public sealed class ContextMenuWindow : SkiaWindow
                 MenuSubmenu s => s.Text,
                 _ => "",
             };
-            using (var p = new SKPaint { IsAntialias = true, TextSize = TextSize, Typeface = tf, Color = new SKColor(255, 255, 255, 235) })
-                canvas.DrawText(text, hasMark ? 34f : 14f, y + h / 2f + 4.5f, p);
+            using (var p = new SKPaint { IsAntialias = true, TextSize = TextSize, Typeface = tf, Color = new SKColor(255, 255, 255, 243) })
+                canvas.DrawText(text, hasMark ? 36f : 16f, y + h / 2f + 4.5f, p);
 
             float markCy = y + h / 2f;
-            if (entry is MenuCheck { Checked: true }) DrawCheck(canvas, 21f, markCy);
-            if (entry is MenuRadio { Checked: true }) DrawRadioDot(canvas, 21f, markCy);
+            if (entry is MenuCheck { Checked: true }) DrawCheck(canvas, 23f, markCy);
+            if (entry is MenuRadio { Checked: true }) DrawRadioDot(canvas, 23f, markCy);
             if (entry is MenuSubmenu) DrawSubmenuArrow(canvas, width - 16f, markCy);
         }
     }
@@ -299,7 +306,7 @@ public sealed class ContextMenuWindow : SkiaWindow
         using var p = new SKPaint
         {
             IsAntialias = true,
-            Color = new SKColor(255, 255, 255, 235),
+            Color = new SKColor(255, 255, 255, 243),
             StrokeWidth = 1.8f,
             StrokeCap = SKStrokeCap.Round,
             StrokeJoin = SKStrokeJoin.Round,
@@ -311,7 +318,7 @@ public sealed class ContextMenuWindow : SkiaWindow
     /// <summary>● 单选标记（实心圆点）。</summary>
     private static void DrawRadioDot(SKCanvas canvas, float cx, float cy)
     {
-        using var p = new SKPaint { IsAntialias = true, Color = new SKColor(255, 255, 255, 235) };
+        using var p = new SKPaint { IsAntialias = true, Color = new SKColor(255, 255, 255, 243) };
         canvas.DrawCircle(cx, cy, 3.4f, p);
     }
 

@@ -7,7 +7,7 @@ public sealed class PrivateTaskbarPlugin : INotchPlugin, IDisposable
 {
     public string Id => "com.dincccc.privatetaskbar.taskbarwidget"; // 必须含 taskbarwidget 标记，宿主据此豁免灵动岛"显示内容"列表
     public string DisplayName => "定制任务栏";
-    public string Version => "1.0.0";
+    public string Version => "1.1.0";
     public string Author => "dincccc";
 
     private IPluginHost? _host;
@@ -56,7 +56,16 @@ public sealed class PrivateTaskbarPlugin : INotchPlugin, IDisposable
         NativeMethods.GetCursorPos(out var pt);
         _menu?.CloseTree();
         var menu = new ContextMenuWindow(BuildMenu(_settings));
-        menu.Closed += () => { if (ReferenceEquals(_menu, menu)) _menu = null; };
+        menu.Closed += () =>
+        {
+            if (ReferenceEquals(_menu, menu)) _menu = null;
+            // 菜单窗口 capture 期间任务栏收不到鼠标消息，关闭后其 hover 跟踪状态可能卡死
+            //（用户复现：关菜单后 hover/右键失灵）；Closed 在 UI 线程触发，直接复位。
+            try { _window?.ResetHover(); } catch { }
+            // 菜单窗口销毁是已知的 TOPMOST 链重排点（用户复现：关菜单后条被压下去消失约 2s），
+            // 立即检查提回，不等下一帧巡检。
+            try { _window?.EnsureTopmostNow(); } catch { }
+        };
         _menu = menu;
         menu.PopupAt(pt.x, pt.y);
     }
@@ -64,6 +73,7 @@ public sealed class PrivateTaskbarPlugin : INotchPlugin, IDisposable
     private IReadOnlyList<MenuEntry> BuildMenu(TaskbarSettings st)
     {
         var media = MediaBridge.Current;
+        bool hasMedia = media is not null; // 菜单打开瞬间的模式快照：时钟/资源/网速按此模式读写
         return new List<MenuEntry>
         {
             new MenuCommand(media is { IsPlaying: true } ? "暂停" : "播放", () => MediaBridge.Invoke("media-play")),
@@ -82,9 +92,14 @@ public sealed class PrivateTaskbarPlugin : INotchPlugin, IDisposable
             new MenuSeparator(),
             new MenuCheck("媒体控件", st.ShowMedia, () => Apply(s => s with { ShowMedia = !s.ShowMedia })),
             new MenuCheck("歌词", st.ShowLyric, () => Apply(s => s with { ShowLyric = !s.ShowLyric })),
-            new MenuCheck("时间日期", st.ShowClock, () => Apply(s => s with { ShowClock = !s.ShowClock })),
-            new MenuCheck("资源监控", st.ShowResources, () => Apply(s => s with { ShowResources = !s.ShowResources })),
-            new MenuCheck("网速", st.ShowNet, () => Apply(s => s with { ShowNet = !s.ShowNet })),
+            // 时钟/资源/网速两模式各自记忆：勾选状态与切换目标都按当前模式路由（TaskbarSettings 的 *Media 键）
+            new MenuLabel(hasMedia ? "有媒体模式 · 以下三项独立记忆" : "无媒体模式 · 以下三项独立记忆"),
+            new MenuCheck("时间日期", hasMedia ? st.ShowClockMedia : st.ShowClock,
+                () => Apply(s => hasMedia ? s with { ShowClockMedia = !s.ShowClockMedia } : s with { ShowClock = !s.ShowClock })),
+            new MenuCheck("资源监控", hasMedia ? st.ShowResourcesMedia : st.ShowResources,
+                () => Apply(s => hasMedia ? s with { ShowResourcesMedia = !s.ShowResourcesMedia } : s with { ShowResources = !s.ShowResources })),
+            new MenuCheck("网速", hasMedia ? st.ShowNetMedia : st.ShowNet,
+                () => Apply(s => hasMedia ? s with { ShowNetMedia = !s.ShowNetMedia } : s with { ShowNet = !s.ShowNet })),
             new MenuSeparator(),
             new MenuCommand("打开正在播放的应用", () => MediaBridge.Invoke("open-app")),
             new MenuCommand("关闭组件", HideBar),
