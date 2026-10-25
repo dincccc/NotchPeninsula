@@ -202,6 +202,8 @@ reviewer 子代理审查全部 9 文件（无 Critical）+ 复核修复（8 通�
 
 **部署**：编译 0/0，E 盘部署重启。实测清单追加：①菜单打开期间条背景/按钮高亮保持；②关菜单后光标在条上 hover 立即恢复、不在则平滑淡出；③二级菜单反复开关。
 
+**⚠️ P1 修复引入的回归（11:19 修复）**：P1 把 OpenSubmenu 改成"先 PopupAsChild 成功再登记 _child"，但 `CreateAt` 里的 `SetCapture(child)` 会**同步**触发本窗口 WM_CAPTURECHANGED——此刻 _child 还是 null，OnCaptureLost 的链内接力识别失败 → CloseChain 整链误关 → 移向二级菜单时父菜单关闭、只剩子菜单挂屏（用户实测复现）。修复 = 恢复"先登记 _child 再弹出"（OnCaptureLost 靠 _child 链放行）+ 创建失败回滚 `_child=null`（P1 死引用防护保留）。**铁律：SetCapture 接力路径上，_child 必须在 SetCapture 之前登记**。
+
 ## 三、待办（新会话从这里继续）
 
 ### 1. worktree 清理（命令已给出，用户自行操作）
