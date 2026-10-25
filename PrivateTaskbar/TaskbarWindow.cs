@@ -4,7 +4,7 @@ using SkiaSharp;
 
 namespace PrivateTaskbar;
 
-/// <summary>任务栏主窗口：贴工作区底部的胶囊条。专用 UI 线程上 Show()。</summary>
+/// <summary>任务栏主窗口：SetParent 挂进系统任务栏的胶囊条。专用 UI 线程上 Show()。</summary>
 public sealed class TaskbarWindow : SkiaWindow
 {
     private const float BarHeight = 52f;      // 逻辑像素
@@ -41,23 +41,14 @@ public sealed class TaskbarWindow : SkiaWindow
     private AudioAnalyzer? _analyzer;
     private bool _analyzerBroken;            // 构造失败后本会话不再尝试，频谱整块隐藏
 
-    // ---- 全屏让位 ----
-    // 检测到全屏前台窗口时条不隐藏、不淡入——只是 z 序沉底让位（退 TOPMOST 组到 HWND_BOTTOM），
-    // 被全屏内容自然盖住；退出全屏提回 TOPMOST 即原位露出，无出现/消失过渡（两轮隐藏/淡入方案
-    // 实测被推翻后收敛的定调）。与 Hidden（用户关闭组件）完全独立记账：Hidden 只由 HideBar 置位、
-    // _fsYield 只由 TickFullscreen 翻转，互不改写对方。
-    // 判据与迟滞在 FullscreenMonitor（前台窗口覆盖主屏的事实信号 + 退出连续两次确认），这里只消费状态沿。
-    private readonly FullscreenMonitor _fsMonitor = new();
-    private bool _fsYield;                   // 全屏让位中（仅 UI 线程触碰）
+    // ---- 任务栏挂载 ----
+    // 学市场插件 NpsTaskbarWidget（反编译实证）：SetParent 挂进系统任务栏（Shell_TrayWnd）成子窗口，
+    // 条的可见性与 z 序完全跟随系统任务栏——全屏/自动隐藏等行为由 Windows 全权处理，本插件不再有
+    // 任何主动 z 序动作。此前的"全屏沉底让位"方案（FullscreenMonitor 前台覆盖判据 + HWND_BOTTOM/
+    // TOPMOST 切换 + EnsureTopmost 每帧保活）在窗口切换时反复重排 z 序造成闪烁，用户实测推翻。
+    // 子窗口 + WS_EX_LAYERED 的 UpdateLayeredWindow 在 Win10/11 可用（NpsTaskbarWidget 同款技术栈实证）。
+    private IntPtr _taskbarHwnd;             // 挂载父窗口（仅 UI 线程触碰）
     private const int AnimIntervalMs = 15;   // 64FPS（见 StartAnimation 处注释）
-    private const int FsYieldIntervalMs = 250;  // 全屏让位期驱动频率：降频但绝不能停（timer 是探测唯一
-                                                // 驱动源，停了退出全屏后条永不提回——第四轮确定性回归教训）
-
-    /// <summary>全屏来临且右键菜单开着时触发：菜单是独立 TOPMOST 窗口，条沉底它也不会跟着沉，
-    /// 会浮在全屏内容上；且菜单持有 capture 会吃掉全屏应用的鼠标输入，必须先关。入口类订阅后
-    /// _menu?.CloseTree()（CloseTree→Closed→ResetHover/EnsureTopmostNow 同线程同步走完，
-    /// 此刻 _fsYield 已置位，回调里的提回会被门控短路）。</summary>
-    public event EventHandler? MenuDismissRequested;
 
     public TaskbarWindow(SystemMonitor monitor, Func<TaskbarSettings> settings)
         : base("NPSPrivateTaskbar", "NPS-PrivateTaskbar", (int)FixedWinW, (int)BarHeight)
@@ -82,18 +73,38 @@ public sealed class TaskbarWindow : SkiaWindow
             NativeMethods.PostMessage(Hwnd, NativeMethods.WM_CLOSE, IntPtr.Zero, IntPtr.Zero);
     }
 
-    /// <summary>窗口创建 + 缓冲就绪 + 首帧绘制完成后回调：算好宽度和位置、启动动画帧，画好首帧再显示。</summary>
+    /// <summary>窗口创建 + 缓冲就绪 + 首帧绘制完成后回调：先挂进系统任务栏（子窗口坐标换算依赖
+    /// 挂载父窗口），再布局、启动动画帧，画好首帧再显示。</summary>
     protected override void OnWindowCreated()
     {
-        // 首拍探测放最前：启用/热重载落点恰在全屏中时立即沉底（随后的 SHOWWINDOW 显示后
-        // 也立即被全屏窗口盖住，不存在"条浮在全屏上"的中间态）
-        TickFullscreen(DateTime.UtcNow);
+        AttachToTaskbar();
         Relayout();
         StartAnimation();
-        // 屏幕外创建→Relayout 已就位后才显示；必须带 NOMOVE，否则这一句会把刚就位的窗口甩回 (0,0)
+        // 屏幕外创建→挂载+Relayout 已就位后才显示；必须带 NOMOVE，否则这一句会把刚就位的窗口甩回 (0,0)
         NativeMethods.SetWindowPos(Hwnd, IntPtr.Zero, 0, 0, 0, 0,
             NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER
             | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
+    }
+
+    /// <summary>SetParent 挂进系统任务栏（WS_POPUP→WS_CHILD 前置样式，NpsTaskbarWidget 同款）。
+    /// 任务栏未起（宿主早于 explorer）或挂载失败（管理员运行被 UIPI 拦截）时保持独立顶层窗口，
+    /// HealthCheck 会周期重试挂载。</summary>
+    private void AttachToTaskbar()
+    {
+        if (_taskbarHwnd != IntPtr.Zero && NativeMethods.IsWindow(_taskbarHwnd)) return;
+        var tray = NativeMethods.FindWindow("Shell_TrayWnd", null);
+        if (tray == IntPtr.Zero) return;
+        int style = NativeMethods.GetWindowLong(Hwnd, NativeMethods.GWL_STYLE);
+        NativeMethods.SetWindowLong(Hwnd, NativeMethods.GWL_STYLE, (style & 0x7FFFFFFF) | NativeMethods.WS_CHILD);
+        if (NativeMethods.SetParent(Hwnd, tray) == IntPtr.Zero)
+        {
+            int err = Marshal.GetLastWin32Error();
+            NativeMethods.SetWindowLong(Hwnd, NativeMethods.GWL_STYLE, style); // 还原样式，避免悬在半改状态
+            Logger.Warn($"[PrivateTaskbar] SetParent(Shell_TrayWnd) 失败: Win32 {err}（管理员运行会被 UIPI 拦截），保持独立窗口，巡检会重试");
+            return;
+        }
+        _taskbarHwnd = tray;
+        Logger.Info($"[PrivateTaskbar] 已挂载到系统任务栏 tray=0x{tray.ToInt64():X}");
     }
 
     protected override void OnPaint(SKCanvas canvas, int width, int height)
@@ -209,135 +220,63 @@ public sealed class TaskbarWindow : SkiaWindow
     }
 
     // ---- 自愈巡检 ----
-    // 第十四轮定调（隐藏/淡入两轮实测后收敛）：全屏前台窗口时条不隐藏——只是 z 序沉底让位（TickFullscreen），
-    // 被全屏内容自然盖住，退出全屏提回 TOPMOST 即原位露出。旧版 QUNS 方案的两个真实缺陷
-    // （专注助手滞留 BUSY 不恢复、SMTC 会话抖动闪烁）已由「前台窗口覆盖主屏」事实判据 + 迟滞根治。
-    // 自愈巡检保留，让位态门控短路防与让位动作打架。
+    // 挂载方案下的自愈只剩两件事：任务栏没挂上/挂载父窗口失效时补挂重试；条被意外隐藏/位置漂移
+    // （explorer 重启、分辨率变更、外部软件乱动窗口等）时拉回。z 序保活（旧版 EnsureTopmost）随
+    // 沉底让位方案一并删除——子窗口的 z 序归父窗口管，没有任何主动竞争，也就不存在"被压"。
 
     private DateTime _healthAt = DateTime.MinValue; // 巡检节流
 
     protected override void OnTimerTick()
     {
-        EnsureTopmost();                 // 每帧廉价检查（纳秒级，被压才 SetWindowPos）
         HealthCheck(DateTime.UtcNow);    // 2s 节流巡检
-        TickFullscreen(DateTime.UtcNow); // 0.25s 节流探测（节流在 FullscreenMonitor 内部）
     }
 
-    /// <summary>自愈巡检（2s 一次，仅正常显示态）：条被意外隐藏/位置漂移
-    /// （explorer 重启、任务栏重组、外部软件乱动窗口等）时拉回，兜住一切"条莫名消失"。
-    /// z 序被压不在这里处理（被压时窗口仍可见、位置正确，巡检查不出来）——由 EnsureTopmost 每帧负责。</summary>
+    /// <summary>自愈巡检（2s 一次）：补挂 + 条被意外隐藏/位置漂移时拉回，兜住一切"条莫名消失"。
+    /// 窗口本体死亡（explorer 重启 → 挂载父窗口死 → 子窗口连带销毁）不在这里检测——WM_DESTROY
+    /// 会在本线程触发 PostQuitMessage，消息循环返回后由入口类按 Closing 标志重建。</summary>
     private void HealthCheck(DateTime now)
     {
-        if (Hidden || _fsYield) return; // 让位期绝不能自愈折腾：条可见且位置正确本就不会触发，门控纯防御
+        if (Hidden) return;
         if ((now - _healthAt).TotalMilliseconds < 2000) return;
         _healthAt = now;
 
+        // 挂载成子窗口后收不到 WM_DISPLAYCHANGE（该广播只发顶层窗口），DPI/缩放变更后由巡检代偿：
+        // 比对系统 DPI，不一致就走既有回调重取重排——否则旧 DPI 算出的错值自洽，巡检永不发现
+        int dpi = (int)NativeMethods.GetDpiForSystem();
+        if (dpi != DpiScale100) { OnDpiOrDisplayChanged(); return; }
+
+        // 补挂：首次挂载时任务栏未起，或挂载父窗口被重建（explorer 重启后子窗口必死，此处主要兜
+        // "SetParent 曾失败"的场景）
+        if ((_taskbarHwnd == IntPtr.Zero || !NativeMethods.IsWindow(_taskbarHwnd))
+            && Hwnd != IntPtr.Zero && NativeMethods.IsWindow(Hwnd))
+        {
+            _taskbarHwnd = IntPtr.Zero;
+            AttachToTaskbar();
+            if (_taskbarHwnd != IntPtr.Zero) { Relayout(); return; }
+        }
+
         bool visible = Hwnd != IntPtr.Zero && NativeMethods.IsWindowVisible(Hwnd);
         bool misplaced = false;
-        int l = 0, t = 0, rr = 0, b = 0;
+        int l = 0, t = 0, rr = 0, b = 0, orgX = 0, orgY = 0;
         if (visible && NativeMethods.GetWindowRect(Hwnd, out var r))
         {
             l = r.Left; t = r.Top; rr = r.Right; b = r.Bottom;
-            misplaced = Math.Abs(r.Left - _posX) > 8 || Math.Abs(r.Top - _posY) > 8;
+            // GetWindowRect 恒返回屏幕坐标；挂载态 _posX/_posY 存父客户区坐标，比较前先平移回来
+            if (_taskbarHwnd != IntPtr.Zero)
+            {
+                var org = new NativeMethods.POINT(0, 0);
+                if (NativeMethods.ClientToScreen(_taskbarHwnd, ref org)) { orgX = org.x; orgY = org.y; }
+            }
+            misplaced = Math.Abs(l - orgX - _posX) > 8 || Math.Abs(t - orgY - _posY) > 8;
         }
         if (!visible || misplaced)
         {
-            Logger.Info($"[PrivateTaskbar] 自愈巡检触发: visible={visible} misplaced={misplaced} rect=({l},{t})-({rr},{b}) 期望=({_posX},{_posY})");
+            Logger.Info($"[PrivateTaskbar] 自愈巡检触发: visible={visible} misplaced={misplaced} rect=({l},{t})-({rr},{b}) 期望=({_posX},{_posY}) 客户区原点=({orgX},{orgY})");
             Relayout();
             NativeMethods.SetWindowPos(Hwnd, IntPtr.Zero, 0, 0, 0, 0,
                 NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER
                 | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
         }
-    }
-
-    /// <summary>置顶保活（宿主 EnsureTopmostAlive 的检测升级版）：条嵌在任务栏带内、与任务栏同处
-    /// TOPMOST 组，其他窗口开/关/激活、右键菜单窗口销毁等都会重排 TOPMOST 链把条压到任务栏之下
-    /// ——条此刻仍"可见、位置正确"，巡检查不出来，旧版盲提 2s 一次导致"消失/闪烁一段时间"才恢复。
-    /// 现在每帧做廉价检查（被压才 SetWindowPos+留证），恢复延迟压到一帧。</summary>
-    private void EnsureTopmost()
-    {
-        if (Hwnd == IntPtr.Zero || _fsYield) return; // 让位期 z 序主动沉底，提回由退出让位全权负责
-                                                     // （含让位瞬间菜单 Closed 回调的提回，防把刚沉底的条提回来）
-        try
-        {
-            IntPtr foreground = NativeMethods.GetForegroundWindow();
-            if (foreground != IntPtr.Zero && foreground != Hwnd)
-            {
-                _ = NativeMethods.GetWindowThreadProcessId(foreground, out uint pid);
-                if (pid == (uint)Environment.ProcessId) return; // 前台是宿主自己的窗口时不抢 z 序
-            }
-            if (IsAboveTaskbar()) return;
-            Logger.Info("[PrivateTaskbar] 条被压到系统任务栏之下，提回 TOPMOST 顶部");
-            NativeMethods.SetWindowPos(Hwnd, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
-                NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
-        }
-        catch { }
-    }
-
-    /// <summary>条是否有效压在系统任务栏之上。判据是「条 vs 任务栏」的相对 z 序，而不是
-    /// 「条是否在 TOPMOST 组绝对顶部」——IME 候选窗、开始菜单等系统 UI 合法待在 TOPMOST 组顶
-    /// （不盖条的位置），把它们当压制者会造成每帧提回的无限拉锯（压力测试实测：与 IME 每 16ms 互刷）。</summary>
-    private bool IsAboveTaskbar()
-    {
-        if ((NativeMethods.GetWindowLong(Hwnd, NativeMethods.GWL_EXSTYLE) & NativeMethods.WS_EX_TOPMOST) == 0)
-            return false; // TOPMOST 样式位丢了（第三方工具清理窗口样式等），视为被压
-        IntPtr taskbar = NativeMethods.FindWindow("Shell_TrayWnd", null);
-        if (taskbar == IntPtr.Zero || taskbar == Hwnd) return true; // 拿不到任务栏就不折腾
-        // 从条沿 z 序向上走：任务栏在条之下时永远遇不到它（健康）；先遇到任务栏即被压。
-        // 32 步上限只是防御（正常 TOPMOST 组远没有这么深）。
-        IntPtr w = NativeMethods.GetWindow(Hwnd, NativeMethods.GW_HWNDPREV);
-        for (int i = 0; w != IntPtr.Zero && i < 32; i++)
-        {
-            if (w == taskbar) return false;
-            w = NativeMethods.GetWindow(w, NativeMethods.GW_HWNDPREV);
-        }
-        return true;
-    }
-
-    /// <summary>绕过节流立即检查（右键菜单关闭等已知重排点主动补救）。仅 UI 线程调用。</summary>
-    public void EnsureTopmostNow() => EnsureTopmost();
-
-    // ---- 全屏让位状态机 ----
-
-    /// <summary>全屏检测→让位/提回（仅 UI 线程：OnTimerTick / OnWindowCreated 首拍）。
-    /// 节流与迟滞都在 FullscreenMonitor 内完成，这里只消费状态沿做窗口动作。</summary>
-    private void TickFullscreen(DateTime now)
-    {
-        if (Hidden) return; // 用户已关组件：HideBar 已停 timer，此为防御
-        if (!_fsMonitor.Tick(now)) return;
-        bool fs = _fsMonitor.IsFullscreen;
-        if (fs == _fsYield) return; // 无状态沿
-        _fsYield = fs;              // 先记账：菜单关闭链（Closed→EnsureTopmostNow）靠它短路提回
-        if (fs) EnterFullscreenYield();
-        else ExitFullscreenRestore();
-    }
-
-    /// <summary>全屏来临：条沉底让位（不隐藏）。TOPMOST 条会浮在全屏内容之上（用户实测在意），
-    /// 退 TOPMOST 组沉到 z 序最底即被全屏窗口自然盖住；被盖期间不可点击（点击落在全屏窗口）。
-    /// 退出全屏提回 TOPMOST 即原位露出——没有出现/消失过渡，这是它与"隐藏/恢复"方案的本质区别。</summary>
-    private void EnterFullscreenYield()
-    {
-        // 类名留证（低频动作日志带数据，同 HealthCheck 带 rect 的思路）：排障时定位是哪个窗口触发
-        Logger.Info($"[PrivateTaskbar] 检测到全屏前台窗口({_fsMonitor.LastForegroundClass})，条沉底让位");
-        if (_menuOpen)
-        {
-            _menuOpen = false; // 事件无人订阅或 CloseTree 失败也不残留（Closed 回调里 ResetHover 幂等重置）
-            try { MenuDismissRequested?.Invoke(this, EventArgs.Empty); } catch { }
-        }
-        // 菜单关闭链里 ResetHover 可能恢复的 hover 随后清掉（被盖住的窗口收不到鼠标消息）
-        _hovered = false; _hoverAction = null; _trackLeave = false;
-        SetAnimInterval(FsYieldIntervalMs); // 被盖住的帧白画，降频省电；绝不能 Stop（第四轮确定性回归教训）
-        if (Hwnd != IntPtr.Zero) NativeMethods.SetWindowPos(Hwnd, NativeMethods.HWND_BOTTOM, 0, 0, 0, 0,
-            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
-    }
-
-    /// <summary>全屏结束：提回 TOPMOST 即露出（条一直在原位，位置经 Relayout 门控放行保持新鲜，无过渡动画）。</summary>
-    private void ExitFullscreenRestore()
-    {
-        Logger.Info("[PrivateTaskbar] 全屏结束，条提回 TOPMOST");
-        if (Hwnd != IntPtr.Zero) NativeMethods.SetWindowPos(Hwnd, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
-            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
-        SetAnimInterval(AnimIntervalMs);
     }
 
     // ---- 鼠标 ----
@@ -392,7 +331,7 @@ public sealed class TaskbarWindow : SkiaWindow
     // ---- 布局与定位 ----
     public void Relayout()
     {
-        if (Hidden) return; // 让位态不门控：条仍可见，分辨率/设置/字体变更实时生效（被盖住看不见而已）
+        if (Hidden) return; // 用户已关组件：窗口已藏且 timer 已停，设置/字体变更等重排无意义
         // 1) 量内容宽（网速用当前 1s 快照，与绘制同源）：只用于首帧初始化动画值与定位，窗口宽度恒定
         var snap = _monitor.Snapshot;
         float contentW = TaskbarRenderer.MeasureContent(_settings(), MediaBridge.Current, _analyzer is not null,
@@ -428,6 +367,14 @@ public sealed class TaskbarWindow : SkiaWindow
         };
         x += (int)(_settings().OffsetX * scale);
 
+        // 挂载态：子窗口的 SetWindowPos/ULW 位置都是父客户区坐标，把上面算好的屏幕坐标平移换算。
+        // 未挂载（Attach 失败重试中）保持屏幕坐标语义，两套坐标在 RepositionTo/ULW 里同源一致。
+        if (_taskbarHwnd != IntPtr.Zero && NativeMethods.IsWindow(_taskbarHwnd))
+        {
+            var org = new NativeMethods.POINT(0, 0);
+            if (NativeMethods.ClientToScreen(_taskbarHwnd, ref org)) { x -= org.x; y -= org.y; }
+        }
+
         if (physW != _physW || physH != _physH) ResizeTo((int)FixedWinW, (int)barH);
         RepositionTo(x, y);
     }
@@ -448,18 +395,18 @@ public sealed class TaskbarWindow : SkiaWindow
 
     // 15ms → 实际 15.6ms ≈ 64FPS：旧值 31ms（≈32FPS）是频谱/歌词扫光不如宿主流畅的主因
     // （宿主岛体默认 90fps；LiquidGlass 帧率档 internal 不可读，user timer 粒度 15.6ms 已是上限）。
-    public void StartAnimation() => SetAnimInterval(AnimIntervalMs);
+    public void StartAnimation()
+    {
+        if (Hwnd == IntPtr.Zero) return;
+        // 动画帧驱动 timer 的显式非零 id：SetTimer 传 nIDEvent=0 时系统分配 id，其 Kill 行为文档未定义
+        // （实测 KillTimer 对分配 id 杀不掉）。显式 id 的 Kill/替换语义跨版本确定，与 ContextMenuWindow.PollTimerId 同款。
+        NativeMethods.KillTimer(Hwnd, AnimTimerId);
+        NativeMethods.SetTimer(Hwnd, AnimTimerId, (uint)AnimIntervalMs, IntPtr.Zero);
+    }
+
     public void StopAnimation()
     {
         if (Hwnd != IntPtr.Zero) NativeMethods.KillTimer(Hwnd, AnimTimerId);
-    }
-
-    /// <summary>重设动画 timer 周期（全屏隐藏降频 / 恢复升频共用）。显式 id 下 SetTimer 是替换语义，
-    /// 先 Kill 再 Set 保证周期干净切换（也覆盖 Hwnd 为零的防御路径：两步都是 no-op）。</summary>
-    private void SetAnimInterval(int ms)
-    {
-        StopAnimation();
-        if (Hwnd != IntPtr.Zero) NativeMethods.SetTimer(Hwnd, AnimTimerId, (uint)ms, IntPtr.Zero);
     }
 
     /// <summary>整组复位 hover 跟踪：右键菜单的 capture 期间本窗口收不到鼠标消息，若光标关闭菜单后
@@ -483,20 +430,23 @@ public sealed class TaskbarWindow : SkiaWindow
                 TaskbarPosition.Center => (FixedWinW - _curW) / 2f,
                 _ => FixedWinW - _curW,
             };
-            int capL = _posX + (int)(capX * scale);
-            int capR = capL + (int)(_curW * scale);
+            // 条左缘以 GetWindowRect 为准（屏幕坐标）：挂载态 _posX 存父客户区坐标，不能与屏幕光标混算
             if (Hwnd != IntPtr.Zero && NativeMethods.GetCursorPos(out var pt)
-                && NativeMethods.GetWindowRect(Hwnd, out var r)
-                && pt.x >= capL && pt.x < capR && pt.y >= r.Top && pt.y < r.Bottom)
+                && NativeMethods.GetWindowRect(Hwnd, out var r))
             {
-                _hovered = true;
-                var tme = new NativeMethods.TRACKMOUSEEVENT
+                int capL = r.Left + (int)(capX * scale);
+                int capR = capL + (int)(_curW * scale);
+                if (pt.x >= capL && pt.x < capR && pt.y >= r.Top && pt.y < r.Bottom)
                 {
-                    cbSize = (uint)Marshal.SizeOf<NativeMethods.TRACKMOUSEEVENT>(),
-                    dwFlags = NativeMethods.TME_LEAVE,
-                    hwndTrack = Hwnd,
-                };
-                if (NativeMethods.TrackMouseEvent(ref tme)) _trackLeave = true;
+                    _hovered = true;
+                    var tme = new NativeMethods.TRACKMOUSEEVENT
+                    {
+                        cbSize = (uint)Marshal.SizeOf<NativeMethods.TRACKMOUSEEVENT>(),
+                        dwFlags = NativeMethods.TME_LEAVE,
+                        hwndTrack = Hwnd,
+                    };
+                    if (NativeMethods.TrackMouseEvent(ref tme)) _trackLeave = true;
+                }
             }
         }
         catch { }
@@ -505,8 +455,7 @@ public sealed class TaskbarWindow : SkiaWindow
 
     public void HideBar()
     {
-        Hidden = true;   // 用户级关闭压倒全屏记账：清掉 _fsYield 防组合态残留（让位态收不到右键，纯防御）
-        _fsYield = false;
+        Hidden = true;   // 用户级关闭（会话级，不写设置）
         ResetHover();
         StopAnimation();
         if (Hwnd != IntPtr.Zero) NativeMethods.SetWindowPos(Hwnd, IntPtr.Zero, 0, 0, 0, 0, NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_HIDEWINDOW);

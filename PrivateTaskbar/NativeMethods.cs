@@ -7,6 +7,8 @@ namespace PrivateTaskbar;
 internal static class NativeMethods
 {
     public const int WS_POPUP = unchecked((int)0x80000000);
+    public const int WS_CHILD = 0x40000000;
+    public const int GWL_STYLE = -16;
     public const int WS_EX_TOPMOST = 0x00000008;
     public const int WS_EX_TOOLWINDOW = 0x00000080;
     public const int WS_EX_LAYERED = 0x00080000;
@@ -179,6 +181,10 @@ internal static class NativeMethods
     [DllImport("user32.dll")] public static extern IntPtr GetWindow(IntPtr hWnd, uint uCmd);
     // x64 进程对 GWL_EXSTYLE 这类 32 位值用 GetWindowLong 合法（句柄类值才需要 GetWindowLongPtr）
     [DllImport("user32.dll", SetLastError = true)] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+    [DllImport("user32.dll", SetLastError = true)] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+    [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+    [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder lpClassName, int nMaxCount);
 
     /// <summary>取证辅助：窗口类名（失败返回 "?"），用于日志定位是谁把条压下去的。</summary>

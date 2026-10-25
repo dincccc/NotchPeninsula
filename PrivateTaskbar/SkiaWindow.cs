@@ -52,6 +52,9 @@ public abstract class SkiaWindow : IDisposable
     protected virtual void OnWindowCreated() { }
     /// <summary>窗口销毁时释放子类持有的原生资源（如 AudioAnalyzer）。</summary>
     protected virtual void OnCleanup() { }
+    /// <summary>WM_DESTROY 时回调（Hwnd 置零前）：无论窗口由谁销毁（本方 DestroyWindow / 外部销毁，
+    /// 如挂载父窗口所在的 explorer 重启导致子窗口连带销毁）都会走到，子类在此感知意外死亡。</summary>
+    protected virtual void OnDestroyed() { }
     /// <summary>WM_DESTROY 时是否 PostQuitMessage 结束本线程消息循环。任务栏窗口为 true；
     /// 菜单窗口必须为 false —— 它与任务栏同线程，任务栏主循环 GetMessage(IntPtr.Zero) 会分发线程内所有窗口的消息，
     /// 菜单销毁绝不能把整条线程的消息循环关掉。</summary>
@@ -222,6 +225,7 @@ public abstract class SkiaWindow : IDisposable
                 NativeMethods.DestroyWindow(Hwnd);
                 return IntPtr.Zero;
             case NativeMethods.WM_DESTROY:
+                OnDestroyed();
                 SkiaHostBridge.Unregister(Hwnd);
                 Hwnd = IntPtr.Zero;
                 // 此处不能 UnregisterClass：窗口仍在销毁序列内，UnregisterClass 必得 1412（ERROR_CLASS_HAS_WINDOWS）。
