@@ -7,7 +7,7 @@ public sealed class PrivateTaskbarPlugin : INotchPlugin, IDisposable
 {
     public string Id => "com.dincccc.privatetaskbar.taskbarwidget"; // 必须含 taskbarwidget 标记，宿主据此豁免灵动岛"显示内容"列表
     public string DisplayName => "定制任务栏";
-    public string Version => "1.1.0";
+    public string Version => "1.1.1";
     public string Author => "dincccc";
 
     private IPluginHost? _host;
@@ -67,7 +67,11 @@ public sealed class PrivateTaskbarPlugin : INotchPlugin, IDisposable
             try { _window?.EnsureTopmostNow(); } catch { }
         };
         _menu = menu;
-        menu.PopupAt(pt.x, pt.y);
+        if (!menu.PopupAt(pt.x, pt.y))
+        {
+            _menu = null; // 创建失败不会触发 Closed，就地复位防止 _menuOpen 永久冻结条的 hover
+            try { _window?.ResetHover(); } catch { }
+        }
     }
 
     private IReadOnlyList<MenuEntry> BuildMenu(TaskbarSettings st)

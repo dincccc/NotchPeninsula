@@ -55,8 +55,9 @@ public sealed class ContextMenuWindow : SkiaWindow
 
     // ---- 弹出 / 关闭 ----
 
-    /// <summary>在光标处弹出（光标右下方，放不下则翻转；上下以整屏为界，允许弹到任务栏上方）。</summary>
-    public void PopupAt(int screenX, int screenY)
+    /// <summary>在光标处弹出（光标右下方，放不下则翻转；上下以整屏为界，允许弹到任务栏上方）。
+    /// 返回 false = 窗口创建失败（此路径不走 Closed，调用方须自行复位状态）。</summary>
+    public bool PopupAt(int screenX, int screenY)
     {
         float scale = NativeMethods.GetDpiForSystem() / 96f;
         int wPhys = (int)(MenuW * scale), hPhys = (int)(_height * scale);
@@ -68,11 +69,11 @@ public sealed class ContextMenuWindow : SkiaWindow
         if (y + hPhys > sb.Bottom) y = screenY - hPhys - (int)(4 * scale); // 光标上方翻转
         x = Math.Clamp(x, sb.Left, Math.Max(sb.Left, sb.Right - wPhys));
         y = Math.Clamp(y, sb.Top, Math.Max(sb.Top, sb.Bottom - hPhys));
-        CreateAt(x, y);
+        return CreateAt(x, y);
     }
 
-    /// <summary>作为子菜单弹出：贴 parent 右侧、与 hover 行顶对齐，越界翻到左侧。</summary>
-    private void PopupAsChild(ContextMenuWindow parent, float rowTopLogic)
+    /// <summary>作为子菜单弹出：贴 parent 右侧、与 hover 行顶对齐，越界翻到左侧。返回 false = 创建失败。</summary>
+    private bool PopupAsChild(ContextMenuWindow parent, float rowTopLogic)
     {
         float scale = NativeMethods.GetDpiForSystem() / 96f;
         int wPhys = (int)(MenuW * scale), hPhys = (int)(_height * scale);
@@ -84,18 +85,19 @@ public sealed class ContextMenuWindow : SkiaWindow
         if (y + hPhys > sb.Bottom) y = sb.Bottom - hPhys;
         x = Math.Clamp(x, sb.Left, Math.Max(sb.Left, sb.Right - wPhys));
         y = Math.Clamp(y, sb.Top, Math.Max(sb.Top, sb.Bottom - hPhys));
-        CreateAt(x, y);
+        return CreateAt(x, y);
     }
 
     /// <summary>创建窗口并显示（不进消息循环），随即抓取鼠标并启动点外轮询兜底。</summary>
-    private void CreateAt(int x, int y)
+    private bool CreateAt(int x, int y)
     {
-        if (!CreateNativeWindow(x, y)) return;
+        if (!CreateNativeWindow(x, y)) return false; // 失败路径不会触发 Closed，调用方负责复位关联状态
         NativeMethods.SetWindowPos(Hwnd, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
             NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW | NativeMethods.SWP_NOMOVE); // NOMOVE 必带：否则 (0,0) 把菜单甩到左上角
         NativeMethods.SetCapture(Hwnd);
         // 线程级 capture 对跨进程点击的 CAPTURECHANGED 时序不可靠：轮询兜底，左键按下且不在菜单链内即关
         NativeMethods.SetTimer(Hwnd, PollTimerId, 80, IntPtr.Zero);
+        return true;
     }
 
     private static readonly IntPtr PollTimerId = (IntPtr)0x5151;
@@ -244,8 +246,8 @@ public sealed class ContextMenuWindow : SkiaWindow
     {
         if (_child is not null) return;
         var child = new ContextMenuWindow(sub.Children, this);
+        if (!child.PopupAsChild(this, _rows[row].Y)) return; // 创建失败不登记：死引用会把后续唤出全部拦死
         _child = child;
-        child.PopupAsChild(this, _rows[row].Y);
     }
 
     private int HitRow(float y)

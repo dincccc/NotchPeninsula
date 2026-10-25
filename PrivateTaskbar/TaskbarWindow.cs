@@ -30,6 +30,7 @@ public sealed class TaskbarWindow : SkiaWindow
     // hover 状态（仅 UI 线程触碰）
     private bool _hovered;
     private bool _trackLeave;
+    private bool _menuOpen;                  // 右键菜单打开中：capture 转移会触发一次 WM_MOUSELEAVE，hover 视觉冻结到菜单关闭
     private string? _hoverAction;
     private float _bgAlpha;                  // 背景 0..1，每帧向目标 Lerp（约 150ms 淡入淡出）
 
@@ -293,6 +294,7 @@ public sealed class TaskbarWindow : SkiaWindow
     protected override void OnMouseLeave()
     {
         _trackLeave = false;
+        if (_menuOpen) return; // 菜单打开期间保持 hover（用户要求）：条已收不到鼠标消息，状态冻结即可
         if (_hovered || _hoverAction is not null)
         {
             _hovered = false;
@@ -311,7 +313,7 @@ public sealed class TaskbarWindow : SkiaWindow
 
     protected override void OnMouseRightDown(float x, float y)
     {
-        _hoverAction = null; // 菜单打开后按钮高亮不再由本窗口跟踪
+        _menuOpen = true; // hover 状态（含按钮高亮）原样冻结，菜单关闭后由 ResetHover 按光标位置重算
         MenuRequested?.Invoke(this, EventArgs.Empty);
     }
 
@@ -389,10 +391,12 @@ public sealed class TaskbarWindow : SkiaWindow
     /// 透明穿透区不算）。</summary>
     public void ResetHover()
     {
+        _menuOpen = false;
         _hovered = false;
         _hoverAction = null;
         _trackLeave = false;
-        _bgAlpha = 0f;
+        // 不硬置 _bgAlpha=0：菜单打开期间背景已冻结在全亮，硬置会让关菜单瞬间背景跳变。
+        // 交给 OnPaint 的 lerp 自然过渡——光标在条上保持全亮，不在则 150ms 淡出。
         try
         {
             float scale = DpiScale100 / 96f;
