@@ -1,6 +1,6 @@
 # PrivateTaskbar 开发进度与待办（新会话依据）
 
-> 更新时间：2026-10-25 09:30。承接 `.documents/20261024_1749_privatetaskbar_requirements.md`（需求规格，权威）与 `.documents/20261024_1644_privatetaskbar.md`（实施计划）。本文档是当前最新状态，优先级高于前两份的历史描述。
+> 更新时间：2026-10-25（第十四轮）。承接 `.documents/20261024_1749_privatetaskbar_requirements.md`（需求规格，权威）与 `.documents/20261024_1644_privatetaskbar.md`（实施计划）。本文档是当前最新状态，优先级高于前两份的历史描述。
 
 ## 一、项目定位
 
@@ -83,7 +83,7 @@ reviewer 子代理审查全部 9 文件（无 Critical）+ 复核修复（8 通�
 
 ### 第六轮：逻辑梳理重构（10-25，用户拍板"避免补丁式更新"）
 
-用户再报 5 问题。日志实锤：**SMTC 媒体会话每 ~270ms 高频重建**（B 站直播页），含瞬时 `[null]` 封面——媒体源本身在抖；媒体控制命令**零失败记录**（都成功发出）。用户明确：**删掉全屏判断这类"聪明逻辑"，从实现逻辑梳理**。
+用户再报 5 问题。日志实锤：**SMTC 媒体会话每 ~270ms 高频重建**（B 站直播页），含瞬时 `[null]` 封面——媒体源本身在抖；媒体控制命令**零失败记录**（都成功发出）。用户明确：**删掉全屏判断这类"聪明逻辑"，从实现逻辑梳理**。（⚠️ 本轮"条恒显示"定调已被第十四轮推翻：全屏隐藏以"前台窗口覆盖主屏"事实判据重新实现，QUNS 缺陷已根治——见第十四轮。）
 
 **重构（第五轮的全屏双条件被推翻删除）**：
 1. **删整套全屏隐藏逻辑**（QUNS 探测/前台覆盖判定/_fsHidden/timer 动态降频 + NativeMethods 对应 P/Invoke）——条恒 TOPMOST 恒显示，全屏应用盖住它=自然遮挡，不需要配合隐藏。这是"消失/闪烁/右键失效"的主要嫌疑源。
@@ -204,7 +204,31 @@ reviewer 子代理审查全部 9 文件（无 Critical）+ 复核修复（8 通�
 
 **⚠️ P1 修复引入的回归（11:19 修复）**：P1 把 OpenSubmenu 改成"先 PopupAsChild 成功再登记 _child"，但 `CreateAt` 里的 `SetCapture(child)` 会**同步**触发本窗口 WM_CAPTURECHANGED——此刻 _child 还是 null，OnCaptureLost 的链内接力识别失败 → CloseChain 整链误关 → 移向二级菜单时父菜单关闭、只剩子菜单挂屏（用户实测复现）。修复 = 恢复"先登记 _child 再弹出"（OnCaptureLost 靠 _child 链放行）+ 创建失败回滚 `_child=null`（P1 死引用防护保留）。**铁律：SetCapture 接力路径上，_child 必须在 SetCapture 之前登记**。
 
+### 第十四轮：全屏自动隐藏重新实现（10-25，v1.2.0，未部署）
+
+用户需求：全屏状态下隐藏任务条。**明确推翻第六轮"条恒显示"定调**（用户澄清：当时删除是因为有 BUG，不是需求被否；"全屏当然要隐藏，我要的是没有 BUG 的隐藏"，且**只动插件、不动宿主**）。
+
+**判据设计（对 QUNS 方案的根因级替代）**：旧方案（第三~五轮）用 QUNS"意图"信号，被专注助手滞留 BUSY（BUG：条永不恢复）与 SMTC 会话抖动（BUG：闪烁）污染。新方案只用"事实"信号——**前台窗口矩形覆盖主屏 ±2px**（`FullscreenMonitor.ForegroundCoversScreen`：GetForegroundWindow→GetClassName 排除 Progman/WorkerW/Shell_TrayWnd→pid 排除自身进程→GetWindowRect ⊇ Screen.PrimaryScreen.Bounds）。独占 D3D 全屏的前台窗口矩形同样是整屏，事实判据全场景覆盖（含 QUNS 常漏的无边框窗口化全屏）。**QUNS 整体退役，插件 NativeMethods 零新增 P/Invoke**。
+
+**实现（3 文件 + csproj）**：
+- **新文件 `FullscreenMonitor.cs`**：检测内聚类。0.8s 时间戳节流（与宿主 TickFullscreenProbe 同口径）+ 迟滞（进入 1 次确认即隐藏要快；退出连续 2 次确认 ≈1.6~2.4s，吸收瞬时抖动——BUG2 根治）。任何失败按非全屏处理（保守侧：宁可不藏绝不闪烁）。`LastForegroundClass` 供隐藏日志留证。
+- **TaskbarWindow.cs**：`_fsHidden` 与 `Hidden`（用户关闭组件）独立记账（写入点各自唯一，HideBar 防御性清 `_fsHidden`）；OnTimerTick 挂 `TickFullscreen`（只消费状态沿做动作）；隐藏=关菜单（若开，经新事件 `MenuDismissRequested`→插件 `_menu?.CloseTree()`，防菜单 capture 吃全屏鼠标输入）→清 hover→`SetAnimInterval(250)` 降频（**绝不能 Stop——timer 是探测唯一驱动源**）→SWP_HIDEWINDOW（带 NOSIZE|NOMOVE|NOZORDER）；恢复=Relayout（全屏期间分辨率/托盘可能变）→升回 15ms→清 hover→`HWND_TOPMOST+SWP_SHOWWINDOW` 一体（隐藏期 TOPMOST 链可能被重排，显式提回一步到位）。**五处门控**：OnPaint/HealthCheck/Relayout 加 `|| _fsHidden`（巡检绝不能把隐藏中的条拉回）、EnsureTopmost 加 `_fsHidden` 早退（短路菜单 Closed 回调的提回）、HideBar 清 `_fsHidden`。
+- **OnWindowCreated 首拍**：`TickFullscreen` 提到 `Relayout` **之前**——启用/热重载落点恰在全屏中时窗口还停在屏幕外就已 HIDEWINDOW，零闪现（若先 Relayout 移入屏幕再隐藏，DWM 有单帧闪现窗口，审查实测坐实）。`_fsHidden` 时 timer 已由 EnterFullscreenHide 以 250ms 启动，不再 StartAnimation。
+- **timer id 显式化（审查实测坐实的关键修复）**：旧 `SetTimer(Hwnd, IntPtr.Zero=0, ...)` 系统分配 id，本机实测 **`KillTimer` 对分配 id 杀不掉**——`StopAnimation` 在 v1.1.1 里一直是 no-op（HideBar 后 timer 仍 15ms 空转）。改为显式 `AnimTimerId=0x1990`（ContextMenu 的 `PollTimerId=0x5151` 同款先例），Kill/替换语义跨版本确定，HideBar 后 timer 真停。
+- **PrivateTaskbarPlugin.cs**：订阅 `MenuDismissRequested`；版本 1.1.1→**1.2.0**（csproj 同步）。
+
+**审查（3 个 code-reviewer 并行：正确性/铁律/简洁性）**：无 P0/P1。已修：P2 timer id（见上）、P2 首拍顺序、Tick 节流哨兵冗余删除（与 HealthCheck 同构）、隐藏日志带前台类名。8 个方向（状态机边界组合/菜单链时序/TME 幽灵事件/迟滞状态沿/旧场景回归/Dispose 竞态/DPI 坐标系/SK 与热重载铁律）全部推演通过。
+
+**部署**：编译 0 警告 0 错误。已部署 E 盘并重启宿主（12:44），日志实锤全屏隐藏/恢复链路真实触发正常（`检测到全屏前台窗口(Chrome_WidgetWin_1)` → 4s 后恢复）。
+
+**实测调优与方案转向（用户两轮反馈，最终定调 12:58 部署）**：
+1. "全屏后停一下才隐藏"——探测周期 0.8s（沿用宿主口径）太慢。降为 **250ms**（进入延迟 ≤0.25s；探测仅 4 个 Win32 调用微秒级），恢复迟滞 2 连拍随之 ≈0.5~1s。
+2. "出现时没有淡入，比较突兀"——先做过 ULW 整窗 SourceConstantAlpha 200ms 淡入（`SkiaWindow.FrameAlpha` + `_showAlpha/_fadeInAt`），用户仍觉怪，并点破本质：**"感觉全屏时没必要隐藏，只要不浮在全屏的应用、视频上面不就好了"**——隐藏/出现这套流程本身就是多余的。
+3. **最终方案：z 序沉底让位（推翻隐藏/淡入整套流程）**——全屏时条 `SetWindowPos(HWND_BOTTOM)` 退 TOPMOST 组沉到 z 序最底，被全屏窗口自然盖住（像被纸压住）；退出全屏 `SetWindowPos(HWND_TOPMOST)` 原位露出。**没有隐藏、没有出现、没有任何过渡动画**——"出现突兀"从机制上不存在。淡入机制（FrameAlpha/_showAlpha/TickFadeIn）整体删除，SkiaWindow 回退。
+4. 让位态门控矩阵重审：EnsureTopmost/HealthCheck 门控保留（防每帧提回打架）；**Relayout/OnPaint 门控移除**（条仍可见，分辨率/设置/字体变更实时生效，恢复时位置已新鲜，Exit 无需 Relayout）；timer 降频 250ms 保留（被盖住的帧白画，省电；绝不能 Stop）；MenuDismissRequested 保留（菜单是独立 TOPMOST 窗口，条沉底它不跟，仍会浮在全屏上）。
+
 ## 三、待办（新会话从这里继续）
+
 
 ### 1. worktree 清理（命令已给出，用户自行操作）
 
@@ -220,7 +244,7 @@ cd H:/Projects/NotchPeninsula && git worktree remove --force H:/Projects/nps-v20
 ### 2. E 盘宿主验证（第五轮修复已部署，待用户实测）
 
 - [x] **部署 2.1.0 版插件 + 重启宿主**：完成（08:31，dll 含第四+五轮全部修复）。
-- [x] **全屏隐藏/恢复**：程序化实测通过（全屏窗 → 隐藏；关闭 → 恢复）。
+- [ ] **全屏隐藏/恢复（第十四轮 v1.2.0 新实现，旧验证已作废）**：全屏游戏/F11/视频 → ≤0.8s 隐；退出 → ≤2.4s 恢复、位置/z 序正确；专注助手开启不卡死（BUG1 回归）；B 站直播页全程无闪烁（BUG2 回归）；右键菜单开着切全屏 → 菜单自动关、条隐藏；多屏副屏全屏 → 主屏条不误藏；插件禁用→启用落点在全屏中 → 不闪现直接隐藏态。
 - [ ] **hover/右键实测（用户物理鼠标）**：① 条上 hover 淡入；② 右键弹菜单；③ 反复开关菜单后 hover/右键仍正常（本轮修复 3 的场景）；④ 菜单样式（新圆角/行高/字色）观感。
 - [ ] **网速/样式观感**：网速两行彩色箭头、字色亮度、竖线消失。
 - [ ] **真实全屏应用回归**：浏览器 F11/视频全屏 → 隐藏；关闭 → 恢复（专注助手开着也不应卡死）。
@@ -245,7 +269,7 @@ cd H:/Projects/NotchPeninsula && git worktree remove --force H:/Projects/nps-v20
 - **Win32 坑**：WNDCLASS 结构体必须 `[StructLayout(..., CharSet=CharSet.Unicode)]`；所有不改位置的 SetWindowPos 必须带 SWP_NOSIZE|SWP_NOMOVE；分层窗口 alpha=0 像素点击穿透（命中需 alpha≥1，常驻 2/255 命中层）；UpdateLayeredWindow 会隐式显示窗口；线程级 SetCapture 对跨进程点击不可靠（轮询兜底）。
 - **热重载（本轮新增）**：窗口类必须每实例唯一（GUID 后缀），绝不沿用 RegisterClass=1410 的残留类；Dispose 必须先置 Closing 停工作、Join 超时要 PostThreadMessage(WM_QUIT) 兜底；宿主 Teardown 同步调 Dispose 后 `alc.Unload()` 异步卸载，窗口类/线程残留 = 崩溃定时炸弹。
 - **UnregisterClass 时机铁律（第四轮新增）**：WM_DESTROY 内 UnregisterClass 必得 1412（窗口还在销毁序列内），只能在 DestroyWindow 返回后调（现统一在 SkiaWindow.Cleanup 尾部）；1 个窗口类占 1 个 win32k 全局原子（全系统共享），右键菜单每开一次就注册/注销一对，泄漏路径必堵。
-- **动画帧率（第八轮更新）**：SetTimer 15ms（实际 15.6ms ≈ 64FPS，user timer 粒度上限；宿主默认 90fps，`LiquidGlass.FrameIntervalMs` internal 不可读）。OnTimerTick 的 HealthCheck 自带 2s 时间戳节流，帧率变化不影响；原"31ms 全屏探测驱动源"铁律随第六轮全屏逻辑删除而失效。
+- **动画帧率（第十四轮更新）**：SetTimer 15ms（实际 15.6ms ≈ 64FPS，user timer 粒度上限；宿主默认 90fps，`LiquidGlass.FrameIntervalMs` internal 不可读）。**timer 同时是全屏探测唯一驱动源：全屏隐藏期降频 250ms 绝不能 Stop**（停了退出全屏条永不恢复——第四轮确定性回归教训），恢复升回 15ms；调频统一走 `TaskbarWindow.SetAnimInterval`（Kill-then-Set，显式 `AnimTimerId`）。OnTimerTick 的 HealthCheck 自带 2s 时间戳节流，帧率变化不影响。
 - **DPI**：进程 PMv2，Screen.WorkingArea 返回物理像素；逻辑量×scale 换物理，wa 不再乘 scale。
 - **布局**：贴托盘以 `FindWindow("Shell_TrayWnd")→FindWindowEx("TrayNotifyWnd")` 实际左缘为准；条高 = min(52, 任务栏带高-2) 带内垂直居中。
 - **子代理体系**：6 个通用代理在 `C:\Users\Administrator\.zcode\agents\`（explorer/vision/implementer/reviewer/tester/scribe），模型 GLM-5.3-Flash 最高档。
