@@ -188,6 +188,20 @@ reviewer 子代理审查全部 9 文件（无 Critical）+ 复核修复（8 通�
 
 **部署**：编译 0/0，E 盘宿主重启（10:55，PID 20232，窗口 900×52 确认）。交互效果需用户实测。
 
+### 第十三轮：菜单期间保持 hover + 审查修复（10-25，v1.1.1）
+
+用户需求：①右键菜单打开时插件要保持 hover 状态；②更新版本号，requesting-code-review 审查通过后提交。
+
+**保持 hover（TaskbarWindow）**：右键弹菜单时 SetCapture 移交导致条收到一次 WM_MOUSELEAVE 清掉 hover。修复 = `_menuOpen` 标志：OnMouseRightDown 置位、OnMouseLeave 期间跳过清理（`_trackLeave` 仍复位，防止残留 true 跳过后续 TrackMouseEvent 重注册）、hover 状态含按钮高亮原样冻结；菜单关闭由 ResetHover 清标志并按光标实际位置重算。
+
+**requesting-code-review 审查（reviewer 子代理，范围 01f4f3d..工作区含 6dcca95）**：结论 With fixes（无 Critical，1 Important + 1 Minor），已修：
+- **P1**：菜单创建失败路径（CreateAt→CreateNativeWindow false）不走 Closed，`_menuOpen` 永久卡 true 冻结 hover。修复 = `CreateAt/PopupAt/PopupAsChild` 返回 bool；Plugin 失败时 `_menu=null + ResetHover()` 兜底；**OpenSubmenu 创建失败不登记 `_child`**（防死引用拦死后续唤出，同第十二轮病理）。
+- **P2**：ResetHover 硬置 `_bgAlpha=0` 在冻结场景产生关菜单瞬间背景跳变。修复 = 删硬置，交给 OnPaint 的 lerp 自然过渡（光标在条上保持全亮、不在则 150ms 淡出）。
+
+版本号 1.1.0 → **1.1.1**（patch：两轮 bug 修复无新功能）。
+
+**部署**：编译 0/0，E 盘部署重启。实测清单追加：①菜单打开期间条背景/按钮高亮保持；②关菜单后光标在条上 hover 立即恢复、不在则平滑淡出；③二级菜单反复开关。
+
 ## 三、待办（新会话从这里继续）
 
 ### 1. worktree 清理（命令已给出，用户自行操作）
