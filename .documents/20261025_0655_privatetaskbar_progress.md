@@ -229,6 +229,27 @@ reviewer 子代理审查全部 9 文件（无 Critical）+ 复核修复（8 通�
 
 **误报修复（用户报"点 Win 开始菜单弹出条就消失"，15:02 部署，版本 1.2.0→**1.2.1**）**：日志实锤两个误报源——`Windows.UI.Core.CoreWindow`（开始菜单/搜索的 XAML 窗口，GetWindowRect 报整屏但视觉不满屏）与 `TscShellContainerClass`（任务视图覆盖层）。修复：类名排除加 TscShellContainerClass；XAML shell 弹层按**进程名**排除（StartMenuExperienceHost/SearchHost/SearchApp/ShellExperienceHost），查询放在矩形已覆盖整屏之后（罕见路径，不占热路径）；**不排除 CoreWindow 类名本身，避免误伤真 UWP 全屏**。遗留观察：日志另有 14:56-57 时段"条被压"高频记录（无沉底日志、EnsureTopmost 提回循环）——已向用户澄清这是第九轮的置顶保活机制（TOPMOST 链重排被压即提回），非全屏让位机制的动作；若反复出现需给被压日志加压制者类名排查。
 
+### 第十五轮：沉底让位 → SetParent 挂载系统任务栏（10-25，v1.3.0，已部署待实测）
+
+用户反馈："不行，问题还在。窗口切换还有闪烁""这个条沉底机制能不能避免？主动沉条也没有存在必要吧，我看另一个任务栏插件怎么没有沉底？窗口切换抖都不抖"。
+
+**参考实现取证（反编译 E 盘市场插件 NpsTaskbarWidget v1.3.0）**：用户说的"另一个任务栏插件"= 官方 `com.notchpeninsula.taskbarwidget`（NPSTaskbarWidget，ilspycmd 反编译）。核心做法：
+- 窗口样式 `WS_POPUP + WS_EX_LAYERED|NOACTIVATE`（**无 TOPMOST、无 TOOLWINDOW**）；
+- `Attach()`：`GetWindowLong(GWL_STYLE)` → `(style & 0x7FFFFFFF) | WS_CHILD` → **`SetParent(hwnd, Shell_TrayWnd)`** 挂成系统任务栏子窗口；
+- 全库**零置顶、零全屏检测、零主动 z 序动作**（HWND_TOPMOST 常量定义了但从未使用）——全屏/自动隐藏等行为完全跟随系统任务栏，由 Windows 全权处理，所以"窗口切换抖都不抖"；
+- 挂载后**照常 UpdateLayeredWindow**（ULW_ALPHA，DIB+SkiaSharp，与我们同构技术栈）——子窗口分层窗口在 Win10/11 可用的实证；有 `RecreateWindow()`（"组件窗口已失效（多半是 Explorer 重启），正在重建"）——父死子亡实锤。
+
+**新方案（本轮）**：删掉整套让位机制，照抄挂载思路：
+- **删除**：`FullscreenMonitor.cs`（整文件）、`_fsYield` 状态机（TickFullscreen/EnterFullscreenYield/ExitFullscreenRestore）、`MenuDismissRequested` 事件、`EnsureTopmost`/`IsAboveTaskbar`/`EnsureTopmostNow`（子窗口 z 序归父窗口管，无竞争即无"被压"）、`SetAnimInterval`（让位降频用途消失）。
+- **新增 `AttachToTaskbar()`**（TaskbarWindow.cs，OnWindowCreated 最先调，先挂再布局）：FindWindow("Shell_TrayWnd") → 改样式 WS_POPUP→WS_CHILD → SetParent；失败（含管理员运行被 UIPI 拦截）还原样式保持独立顶层窗口+日志。挂载成功日志 `已挂载到系统任务栏 tray=0x…`。
+- **坐标语义切换**：子窗口的 SetWindowPos/ULW ptDst 均为**父客户区坐标**。Relayout 末尾算好屏幕坐标后 `ClientToScreen(taskbar)` 平移换算；HealthCheck 位置比较反向平移（GetWindowRect 恒返回屏幕坐标）；ResetHover 胶囊左缘改用 GetWindowRect().Left（原 _posX 在挂载后是客户区坐标，与屏幕光标混算会错位）。
+- **Explorer 重启自愈（重建闭环）**：父死子亡 → 系统在本线程投 WM_DESTROY → `PostQuitMessage` → 消息循环返回 → 插件层 `UiThreadMain` 按 `!Closing` 识别意外死亡 → `RebuildAfterWindowLost(lost)`（`_lifecycleLock` 内：先关僵尸菜单**再查** _disposed（Dispose 竞态下 RunOnUi 对死窗口的投递被丢弃，同步关菜单是唯一机会）→ 10 分钟滑动窗限 5 次 → new TaskbarWindow（**Hidden 状态从 lost 延续**，防"关闭组件"后重启条复活）+ 订阅 + 新 STA 线程替换 `_window/_uiThread`）。Dispose 在同锁内置 `_disposed` + 引用快照，与重建互斥。
+- **审查修复（1 P1 + 3 P2，全修）**：P1 **子窗口收不到 WM_DISPLAYCHANGE**（广播只发顶层窗口）——DPI 变更后旧值自洽、巡检永不发现，HealthCheck 加 DPI 比对代偿（GetDpiForSystem ≠ DpiScale100 → OnDpiOrDisplayChanged）；P2 Rebuild 链异常兜底（IsBackground 线程未处理异常会炸宿主）；P2 僵尸菜单清理提到 _disposed 检查前；P2 Hidden 重建延续。
+- 审查代理另做 Win32 最小实测排除"SetParent 成功返回 NULL"歧义（实际返回非 NULL 旧内部父句柄），当前判成败写法正确。
+
+**部署验证（15:59）**：构建 0 警告 0 错误；E 盘部署重启；日志 `窗口已创建 … 900x52 @(-32000,-32000)` → `已挂载到系统任务栏 tray=0x101E4`；EnumWindows 顶层列表**不再出现条窗口**（子窗口铁证）；GetWindowRect `(18,1033)-(918,1079)` 与挂载前逐像素一致（客户区换算精确），parent=0x101E4=Shell_TrayWnd。
+
+
 ## 三、待办（新会话从这里继续）
 
 
@@ -243,15 +264,16 @@ cd H:/Projects/NotchPeninsula && git worktree remove --force H:/Projects/nps-v20
 
 ⚠️ 删除后将无法再编译 v2.0.2 兼容版插件（v2.0.2 宿主 AssemblyVersion 低，不能加载 2.1.0 API 编译的 dll）。E 盘若还需跑 2.0.2 宿主，`E:/NotchPeninsula/plugins/PrivateTaskbar.dll` 里那份 v2.0.2 编译产物（10-24 21:09）勿覆盖。
 
-### 2. E 盘宿主验证（第五轮修复已部署，待用户实测）
+### 2. E 盘宿主验证（第十五轮挂载方案 v1.3.0 已部署，待用户实测）
 
-- [x] **部署 2.1.0 版插件 + 重启宿主**：完成（08:31，dll 含第四+五轮全部修复）。
-- [ ] **全屏隐藏/恢复（第十四轮 v1.2.0 新实现，旧验证已作废）**：全屏游戏/F11/视频 → ≤0.8s 隐；退出 → ≤2.4s 恢复、位置/z 序正确；专注助手开启不卡死（BUG1 回归）；B 站直播页全程无闪烁（BUG2 回归）；右键菜单开着切全屏 → 菜单自动关、条隐藏；多屏副屏全屏 → 主屏条不误藏；插件禁用→启用落点在全屏中 → 不闪现直接隐藏态。
-- [ ] **hover/右键实测（用户物理鼠标）**：① 条上 hover 淡入；② 右键弹菜单；③ 反复开关菜单后 hover/右键仍正常（本轮修复 3 的场景）；④ 菜单样式（新圆角/行高/字色）观感。
-- [ ] **网速/样式观感**：网速两行彩色箭头、字色亮度、竖线消失。
-- [ ] **真实全屏应用回归**：浏览器 F11/视频全屏 → 隐藏；关闭 → 恢复（专注助手开着也不应卡死）。
-- [ ] P0 热重载（插件中心禁用→立即启用反复数次）、窗口类泄漏回归、频谱/无歌词/媒体区联动、持久化、空壳模式。
-- [ ] 桌面验证：**PowerShell 注入鼠标事件在本会话环境被吞（不可用）**，仅截图类可用（CopyFromScreen）；E/H 盘宿主共享插件启用/失败名单（复现前需清理注册表状态）。
+- [x] **部署 v1.3.0 + 重启宿主**：完成（15:59，挂载日志与窗口位置已验证）。
+- [ ] **挂载核心验证**：桌面/正常窗口下条显示、位置与 v1.2.1 逐像素一致；**窗口间切换反复操作 → 条纹丝不动**（本轮主诉）；全屏游戏/F11/视频 → 条被盖不浮在上面（跟随任务栏，无任何主动动作）；退出全屏 → 条原位露出。
+- [ ] **交互回归**：条上 hover 淡入、左键点按钮（播放/暂停/上一曲/下一曲）、右键弹菜单、菜单内开关设置立即生效、菜单关闭后 hover/右键仍正常（菜单 capture 接力场景）。
+- [ ] **Explorer 重启自愈**：任务管理器重启 explorer → 条消失（父死子亡预期行为）→ 日志出现"任务栏窗口已重建" → 条重新挂载显示、位置正确。
+- [ ] **DPI 变更代偿**：改系统缩放（100%↔125%）→ ≤2s 内条尺寸/位置/清晰度自动修正（子窗口收不到 WM_DISPLAYCHANGE，巡检代偿路径）。
+- [ ] **关闭组件语义**：右键菜单"关闭组件" → 条消失；explorer 重启后仍保持隐藏（Hidden 随重建延续）；插件中心禁用→启用恢复。
+- [ ] **热重载回归**：插件中心禁用→立即启用反复数次（旧线程退出/新窗口类注册/挂载竞态）。
+- [ ] ⚠️ 若宿主以**管理员运行**：SetParent 会被 UIPI 拦截（日志有"SetParent(Shell_TrayWnd) 失败"），条退回独立顶层 TOPMOST 窗口（旧行为，全屏会浮在上面）——需用户反馈部署形态再定对策。
 
 ### 3. 用户验收剩余项（上轮遗留）
 
