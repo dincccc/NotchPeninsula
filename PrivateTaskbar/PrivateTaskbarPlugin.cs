@@ -7,7 +7,7 @@ public sealed class PrivateTaskbarPlugin : INotchPlugin, IDisposable
 {
     public string Id => "com.dincccc.privatetaskbar.taskbarwidget"; // 必须含 taskbarwidget 标记，宿主据此豁免灵动岛"显示内容"列表
     public string DisplayName => "定制任务栏";
-    public string Version => "1.1.1";
+    public string Version => "1.2.0";
     public string Author => "dincccc";
 
     private IPluginHost? _host;
@@ -32,6 +32,8 @@ public sealed class PrivateTaskbarPlugin : INotchPlugin, IDisposable
         var w = new TaskbarWindow(monitor, () => _settings);
         _window = w;
         w.MenuRequested += Window_MenuRequested;
+        // 全屏来临且菜单开着：先同步关菜单（菜单 capture 会吃掉全屏应用的鼠标输入）再隐藏条
+        w.MenuDismissRequested += (_, _) => { try { _menu?.CloseTree(); } catch { } };
         _uiThread = new Thread(() =>
         {
             try

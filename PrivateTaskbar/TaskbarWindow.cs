@@ -24,7 +24,10 @@ public sealed class TaskbarWindow : SkiaWindow
     private readonly SystemMonitor _monitor;
     private readonly Func<TaskbarSettings> _settings;
     public volatile bool Hidden;             // 菜单"关闭组件"置 true（会话级）
-    private IntPtr _animTimer;               // 15ms ≈ 64FPS 动画帧驱动
+    // 动画帧驱动 timer 的显式非零 id：SetTimer 传 nIDEvent=0 时系统分配 id，其 Kill/替换行为文档未定义
+    // （实测 KillTimer 对分配 id 杀不掉，StopAnimation 会失效）。显式 id 的 Kill/替换语义跨版本确定，
+    // 与 ContextMenuWindow.PollTimerId 同款做法。
+    private static readonly IntPtr AnimTimerId = (IntPtr)0x1990;
     private List<(SKRect Rect, string Action)> _hits = new();
 
     // hover 状态（仅 UI 线程触碰）
@@ -37,6 +40,24 @@ public sealed class TaskbarWindow : SkiaWindow
     // 频谱源：媒体激活时创建、失活时释放（仅 UI 线程触碰）
     private AudioAnalyzer? _analyzer;
     private bool _analyzerBroken;            // 构造失败后本会话不再尝试，频谱整块隐藏
+
+    // ---- 全屏让位 ----
+    // 检测到全屏前台窗口时条不隐藏、不淡入——只是 z 序沉底让位（退 TOPMOST 组到 HWND_BOTTOM），
+    // 被全屏内容自然盖住；退出全屏提回 TOPMOST 即原位露出，无出现/消失过渡（两轮隐藏/淡入方案
+    // 实测被推翻后收敛的定调）。与 Hidden（用户关闭组件）完全独立记账：Hidden 只由 HideBar 置位、
+    // _fsYield 只由 TickFullscreen 翻转，互不改写对方。
+    // 判据与迟滞在 FullscreenMonitor（前台窗口覆盖主屏的事实信号 + 退出连续两次确认），这里只消费状态沿。
+    private readonly FullscreenMonitor _fsMonitor = new();
+    private bool _fsYield;                   // 全屏让位中（仅 UI 线程触碰）
+    private const int AnimIntervalMs = 15;   // 64FPS（见 StartAnimation 处注释）
+    private const int FsYieldIntervalMs = 250;  // 全屏让位期驱动频率：降频但绝不能停（timer 是探测唯一
+                                                // 驱动源，停了退出全屏后条永不提回——第四轮确定性回归教训）
+
+    /// <summary>全屏来临且右键菜单开着时触发：菜单是独立 TOPMOST 窗口，条沉底它也不会跟着沉，
+    /// 会浮在全屏内容上；且菜单持有 capture 会吃掉全屏应用的鼠标输入，必须先关。入口类订阅后
+    /// _menu?.CloseTree()（CloseTree→Closed→ResetHover/EnsureTopmostNow 同线程同步走完，
+    /// 此刻 _fsYield 已置位，回调里的提回会被门控短路）。</summary>
+    public event EventHandler? MenuDismissRequested;
 
     public TaskbarWindow(SystemMonitor monitor, Func<TaskbarSettings> settings)
         : base("NPSPrivateTaskbar", "NPS-PrivateTaskbar", (int)FixedWinW, (int)BarHeight)
@@ -64,6 +85,9 @@ public sealed class TaskbarWindow : SkiaWindow
     /// <summary>窗口创建 + 缓冲就绪 + 首帧绘制完成后回调：算好宽度和位置、启动动画帧，画好首帧再显示。</summary>
     protected override void OnWindowCreated()
     {
+        // 首拍探测放最前：启用/热重载落点恰在全屏中时立即沉底（随后的 SHOWWINDOW 显示后
+        // 也立即被全屏窗口盖住，不存在"条浮在全屏上"的中间态）
+        TickFullscreen(DateTime.UtcNow);
         Relayout();
         StartAnimation();
         // 屏幕外创建→Relayout 已就位后才显示；必须带 NOMOVE，否则这一句会把刚就位的窗口甩回 (0,0)
@@ -185,16 +209,18 @@ public sealed class TaskbarWindow : SkiaWindow
     }
 
     // ---- 自愈巡检 ----
-    // 第五轮设计定调（用户拍板）：条是纯显示层，恒 TOPMOST 恒显示，不做任何"自动隐藏"的聪明逻辑
-    // ——QUNS 全屏判断在真实环境里只会带来消失/闪烁（专注助手滞留 BUSY、SMTC 会话抖动），
-    // 全屏应用盖住条就是自然的遮挡，不需要我们配合。唯一保留的自愈：可见性/位置巡检。
+    // 第十四轮定调（隐藏/淡入两轮实测后收敛）：全屏前台窗口时条不隐藏——只是 z 序沉底让位（TickFullscreen），
+    // 被全屏内容自然盖住，退出全屏提回 TOPMOST 即原位露出。旧版 QUNS 方案的两个真实缺陷
+    // （专注助手滞留 BUSY 不恢复、SMTC 会话抖动闪烁）已由「前台窗口覆盖主屏」事实判据 + 迟滞根治。
+    // 自愈巡检保留，让位态门控短路防与让位动作打架。
 
     private DateTime _healthAt = DateTime.MinValue; // 巡检节流
 
     protected override void OnTimerTick()
     {
-        EnsureTopmost();               // 每帧廉价检查（纳秒级，被压才 SetWindowPos）
-        HealthCheck(DateTime.UtcNow);  // 2s 节流巡检
+        EnsureTopmost();                 // 每帧廉价检查（纳秒级，被压才 SetWindowPos）
+        HealthCheck(DateTime.UtcNow);    // 2s 节流巡检
+        TickFullscreen(DateTime.UtcNow); // 0.25s 节流探测（节流在 FullscreenMonitor 内部）
     }
 
     /// <summary>自愈巡检（2s 一次，仅正常显示态）：条被意外隐藏/位置漂移
@@ -202,7 +228,7 @@ public sealed class TaskbarWindow : SkiaWindow
     /// z 序被压不在这里处理（被压时窗口仍可见、位置正确，巡检查不出来）——由 EnsureTopmost 每帧负责。</summary>
     private void HealthCheck(DateTime now)
     {
-        if (Hidden) return;
+        if (Hidden || _fsYield) return; // 让位期绝不能自愈折腾：条可见且位置正确本就不会触发，门控纯防御
         if ((now - _healthAt).TotalMilliseconds < 2000) return;
         _healthAt = now;
 
@@ -230,7 +256,8 @@ public sealed class TaskbarWindow : SkiaWindow
     /// 现在每帧做廉价检查（被压才 SetWindowPos+留证），恢复延迟压到一帧。</summary>
     private void EnsureTopmost()
     {
-        if (Hwnd == IntPtr.Zero) return;
+        if (Hwnd == IntPtr.Zero || _fsYield) return; // 让位期 z 序主动沉底，提回由退出让位全权负责
+                                                     // （含让位瞬间菜单 Closed 回调的提回，防把刚沉底的条提回来）
         try
         {
             IntPtr foreground = NativeMethods.GetForegroundWindow();
@@ -269,6 +296,49 @@ public sealed class TaskbarWindow : SkiaWindow
 
     /// <summary>绕过节流立即检查（右键菜单关闭等已知重排点主动补救）。仅 UI 线程调用。</summary>
     public void EnsureTopmostNow() => EnsureTopmost();
+
+    // ---- 全屏让位状态机 ----
+
+    /// <summary>全屏检测→让位/提回（仅 UI 线程：OnTimerTick / OnWindowCreated 首拍）。
+    /// 节流与迟滞都在 FullscreenMonitor 内完成，这里只消费状态沿做窗口动作。</summary>
+    private void TickFullscreen(DateTime now)
+    {
+        if (Hidden) return; // 用户已关组件：HideBar 已停 timer，此为防御
+        if (!_fsMonitor.Tick(now)) return;
+        bool fs = _fsMonitor.IsFullscreen;
+        if (fs == _fsYield) return; // 无状态沿
+        _fsYield = fs;              // 先记账：菜单关闭链（Closed→EnsureTopmostNow）靠它短路提回
+        if (fs) EnterFullscreenYield();
+        else ExitFullscreenRestore();
+    }
+
+    /// <summary>全屏来临：条沉底让位（不隐藏）。TOPMOST 条会浮在全屏内容之上（用户实测在意），
+    /// 退 TOPMOST 组沉到 z 序最底即被全屏窗口自然盖住；被盖期间不可点击（点击落在全屏窗口）。
+    /// 退出全屏提回 TOPMOST 即原位露出——没有出现/消失过渡，这是它与"隐藏/恢复"方案的本质区别。</summary>
+    private void EnterFullscreenYield()
+    {
+        // 类名留证（低频动作日志带数据，同 HealthCheck 带 rect 的思路）：排障时定位是哪个窗口触发
+        Logger.Info($"[PrivateTaskbar] 检测到全屏前台窗口({_fsMonitor.LastForegroundClass})，条沉底让位");
+        if (_menuOpen)
+        {
+            _menuOpen = false; // 事件无人订阅或 CloseTree 失败也不残留（Closed 回调里 ResetHover 幂等重置）
+            try { MenuDismissRequested?.Invoke(this, EventArgs.Empty); } catch { }
+        }
+        // 菜单关闭链里 ResetHover 可能恢复的 hover 随后清掉（被盖住的窗口收不到鼠标消息）
+        _hovered = false; _hoverAction = null; _trackLeave = false;
+        SetAnimInterval(FsYieldIntervalMs); // 被盖住的帧白画，降频省电；绝不能 Stop（第四轮确定性回归教训）
+        if (Hwnd != IntPtr.Zero) NativeMethods.SetWindowPos(Hwnd, NativeMethods.HWND_BOTTOM, 0, 0, 0, 0,
+            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+    }
+
+    /// <summary>全屏结束：提回 TOPMOST 即露出（条一直在原位，位置经 Relayout 门控放行保持新鲜，无过渡动画）。</summary>
+    private void ExitFullscreenRestore()
+    {
+        Logger.Info("[PrivateTaskbar] 全屏结束，条提回 TOPMOST");
+        if (Hwnd != IntPtr.Zero) NativeMethods.SetWindowPos(Hwnd, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOACTIVATE);
+        SetAnimInterval(AnimIntervalMs);
+    }
 
     // ---- 鼠标 ----
 
@@ -322,7 +392,7 @@ public sealed class TaskbarWindow : SkiaWindow
     // ---- 布局与定位 ----
     public void Relayout()
     {
-        if (Hidden) return;
+        if (Hidden) return; // 让位态不门控：条仍可见，分辨率/设置/字体变更实时生效（被盖住看不见而已）
         // 1) 量内容宽（网速用当前 1s 快照，与绘制同源）：只用于首帧初始化动画值与定位，窗口宽度恒定
         var snap = _monitor.Snapshot;
         float contentW = TaskbarRenderer.MeasureContent(_settings(), MediaBridge.Current, _analyzer is not null,
@@ -378,11 +448,18 @@ public sealed class TaskbarWindow : SkiaWindow
 
     // 15ms → 实际 15.6ms ≈ 64FPS：旧值 31ms（≈32FPS）是频谱/歌词扫光不如宿主流畅的主因
     // （宿主岛体默认 90fps；LiquidGlass 帧率档 internal 不可读，user timer 粒度 15.6ms 已是上限）。
-    // 恒定帧率，不做状态调频
-    public void StartAnimation() => _animTimer = NativeMethods.SetTimer(Hwnd, IntPtr.Zero, 15, IntPtr.Zero);
+    public void StartAnimation() => SetAnimInterval(AnimIntervalMs);
     public void StopAnimation()
     {
-        if (_animTimer != IntPtr.Zero) { NativeMethods.KillTimer(Hwnd, _animTimer); _animTimer = IntPtr.Zero; }
+        if (Hwnd != IntPtr.Zero) NativeMethods.KillTimer(Hwnd, AnimTimerId);
+    }
+
+    /// <summary>重设动画 timer 周期（全屏隐藏降频 / 恢复升频共用）。显式 id 下 SetTimer 是替换语义，
+    /// 先 Kill 再 Set 保证周期干净切换（也覆盖 Hwnd 为零的防御路径：两步都是 no-op）。</summary>
+    private void SetAnimInterval(int ms)
+    {
+        StopAnimation();
+        if (Hwnd != IntPtr.Zero) NativeMethods.SetTimer(Hwnd, AnimTimerId, (uint)ms, IntPtr.Zero);
     }
 
     /// <summary>整组复位 hover 跟踪：右键菜单的 capture 期间本窗口收不到鼠标消息，若光标关闭菜单后
@@ -428,7 +505,8 @@ public sealed class TaskbarWindow : SkiaWindow
 
     public void HideBar()
     {
-        Hidden = true;
+        Hidden = true;   // 用户级关闭压倒全屏记账：清掉 _fsYield 防组合态残留（让位态收不到右键，纯防御）
+        _fsYield = false;
         ResetHover();
         StopAnimation();
         if (Hwnd != IntPtr.Zero) NativeMethods.SetWindowPos(Hwnd, IntPtr.Zero, 0, 0, 0, 0, NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_HIDEWINDOW);

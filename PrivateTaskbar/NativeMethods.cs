@@ -36,6 +36,7 @@ internal static class NativeMethods
     public const uint SWP_SHOWWINDOW = 0x0040;
     public const uint SWP_HIDEWINDOW = 0x0080;
     public static readonly IntPtr HWND_TOPMOST = new(-1);
+    public static readonly IntPtr HWND_BOTTOM = new(1);
 
     public const int IDC_ARROW = 32512;
     public const uint ULW_ALPHA = 0x02;

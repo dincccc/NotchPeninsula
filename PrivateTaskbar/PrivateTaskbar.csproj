@@ -19,7 +19,7 @@
     <Nullable>enable</Nullable>
     <OutputType>Library</OutputType>
     <AssemblyName>PrivateTaskbar</AssemblyName>
-    <Version>1.1.1</Version>
+    <Version>1.2.0</Version>
     <RootNamespace>PrivateTaskbar</RootNamespace>
     <!-- 宿主用了 WinForms 不会传递给插件；本插件要用 Screen.WorkingArea 拿工作区
          （WindowsDesktop framework 清单自带 System.Diagnostics.PerformanceCounter，GPU 采样无需额外包） -->
