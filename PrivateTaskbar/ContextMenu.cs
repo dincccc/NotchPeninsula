@@ -134,6 +134,8 @@ public sealed class ContextMenuWindow : SkiaWindow
         _closing = true;
         if (Hwnd != IntPtr.Zero) NativeMethods.KillTimer(Hwnd, PollTimerId);
         var parent = _parent;
+        if (parent is not null && ReferenceEquals(parent._child, this))
+            parent._child = null; // 清父的死引用：残留会让 OpenSubmenu 的防重入检查把之后的唤出全部拦死
         if (NativeMethods.GetCapture() == Hwnd)
         {
             NativeMethods.ReleaseCapture();
@@ -153,9 +155,18 @@ public sealed class ContextMenuWindow : SkiaWindow
         NativeMethods.GetCursorPos(out var pt);
         if (!ContainsPt(pt.x, pt.y))
         {
-            // 移回父级菜单 → 关掉自己把 capture 让回去；纯出界不关（可能正在移向子菜单或返回途中）
-            if (IsCursorInsideAncestor()) CloseSelf();
-            return;
+            // capture 在本窗口：光标回到父链菜单上时转交父级处理 hover（父更新高亮，移到
+            // 非唤出行时关掉本子树）。绝不能直接 CloseSelf——子菜单刚弹出时光标多半还停在
+            // 父级的唤出行上，旧逻辑一动就自杀，且父 _child 残留死引用会把之后的唤出全部拦死
+            //（用户实测：二级菜单无法唤出）。
+            for (var p = _parent; p is not null; p = p._parent)
+            {
+                if (!p.ContainsPt(pt.x, pt.y)) continue;
+                if (_hoverRow != -1) { _hoverRow = -1; Invalidate(); } // 清自身高亮
+                p.HandleHoverFromChild(pt);
+                return;
+            }
+            return; // 纯出界不关（可能正在移向屏幕他处）；点外由 PollTimer 兜底
         }
         int row = HitRow(y);
         if (row != _hoverRow) { _hoverRow = row; Invalidate(); }
@@ -164,6 +175,17 @@ public sealed class ContextMenuWindow : SkiaWindow
             if (_rows[row].Entry is MenuSubmenu sub) OpenSubmenu(row, sub);
             else if (_child is not null) { var c = _child; _child = null; c.CloseTree(); }
         }
+    }
+
+    /// <summary>子菜单转交来的 hover（capture 在子菜单、光标回到本菜单）：更新本菜单高亮；
+    /// 光标移到非子菜单唤出行时关掉子树，把 capture 收回来。</summary>
+    private void HandleHoverFromChild(NativeMethods.POINT pt)
+    {
+        float y = (pt.y - _posY) * 96f / DpiScale100;
+        int row = HitRow(y);
+        if (row != _hoverRow) { _hoverRow = row; Invalidate(); }
+        if (row >= 0 && _rows[row].Entry is MenuSubmenu) return; // 仍停在唤出行：子菜单保持
+        if (_child is not null) { var c = _child; _child = null; c.CloseTree(); }
     }
 
     protected override void OnMouseLeftDown(float x, float y)
