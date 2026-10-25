@@ -172,6 +172,22 @@ reviewer 子代理审查全部 9 文件（无 Critical）+ 复核修复（8 通�
 
 验证：编译 0/0，E 盘宿主重启，截图渲染无回归。
 
+### 第十二轮：二级菜单无法唤出修复（10-25，已在 v1.1.0 内，已提交后又修复）
+
+用户报：右键菜单"位置微调"二级菜单无法唤出。
+
+**病理链条（ContextMenu 子菜单机制一直存在的缺陷，与第十一轮清理无关）**：
+1. hover 到"位置微调" → `OpenSubmenu` 弹出子菜单，capture 移交给子菜单窗口；
+2. 鼠标稍动 → WM_MOUSEMOVE 发给子菜单（capture）→ 它判 `IsCursorInsideAncestor()`=true → **立即 CloseSelf**（旧逻辑"移回父级就关自己"——但子菜单刚弹出时光标必然还停在父级唤出行上，一动就误杀）；
+3. **CloseSelf 不清父的 `_child`** → 父残留已销毁窗口的死引用；
+4. 之后再 hover 唤出行 → `OpenSubmenu` 的 `if (_child is not null) return` 被死引用拦死 → **永远无法唤出**。
+
+**修复（ContextMenu.cs）**：
+- `CloseSelf` 清父引用（`parent._child = null`，`OnMouseLeftDown`"点回父级"路径同样受益）；
+- 子菜单 `OnMouseMove` 出界分支：光标在父链上时**转交 `HandleHoverFromChild`**（父更新 hover 高亮、光标移到非唤出行才关子树收 capture），替换"一见祖先就自杀"；纯出界仍不关（点外由 PollTimer 兜底）。
+
+**部署**：编译 0/0，E 盘宿主重启（10:55，PID 20232，窗口 900×52 确认）。交互效果需用户实测。
+
 ## 三、待办（新会话从这里继续）
 
 ### 1. worktree 清理（命令已给出，用户自行操作）
