@@ -246,8 +246,12 @@ public sealed class ContextMenuWindow : SkiaWindow
     {
         if (_child is not null) return;
         var child = new ContextMenuWindow(sub.Children, this);
-        if (!child.PopupAsChild(this, _rows[row].Y)) return; // 创建失败不登记：死引用会把后续唤出全部拦死
+        // 必须先登记再弹出：CreateAt 里的 SetCapture(child) 会同步触发本窗口 WM_CAPTURECHANGED，
+        // OnCaptureLost 靠 _child 链识别"链内接力"放行——后登记就等于整链误关、只剩子菜单挂在屏幕上。
+        // 先登记 + 失败回滚：创建失败清掉引用，防死引用拦死后续唤出（两种病理都要防）。
         _child = child;
+        if (!child.PopupAsChild(this, _rows[row].Y))
+            _child = null;
     }
 
     private int HitRow(float y)
