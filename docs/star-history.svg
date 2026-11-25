@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="960" height="370" viewBox="0 0 960 370" role="img" aria-labelledby="title desc">
   <title id="title">NotchPeninsula Star History</title>
-  <desc id="desc">Cumulative currently active GitHub stars through 2026-11-24. Total: 0.</desc>
+  <desc id="desc">Cumulative currently active GitHub stars through 2026-11-25. Total: 0.</desc>
   <rect width="960" height="370" rx="18" fill="#f4f8fc"/>
   <g font-family="system-ui, sans-serif">
     <text x="32" y="46" fill="#142b46" font-weight="700" font-size="24">Star History</text>
@@ -17,8 +17,8 @@
     <text x="64" y="163" text-anchor="end">3</text>
     <path d="M 78 103 H 916" stroke="#dbe5ef"/>
     <text x="64" y="108" text-anchor="end">4</text>
-    <text x="78.00" y="349" text-anchor="middle">2026-11-23</text>
-    <text x="916.00" y="349" text-anchor="middle">2026-11-24</text>
+    <text x="78.00" y="349" text-anchor="middle">2026-11-24</text>
+    <text x="916.00" y="349" text-anchor="middle">2026-11-25</text>
     </g>
   </g>
   <path d="M 78 323 H 916 V 323 H 78 Z" fill="#d9eafb"/>
